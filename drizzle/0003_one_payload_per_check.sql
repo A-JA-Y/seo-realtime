@@ -1,0 +1,1 @@
+ALTER TABLE "serp_payloads" ADD CONSTRAINT "serp_payloads_one_per_check" UNIQUE("serp_check_id");

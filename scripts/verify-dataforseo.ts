@@ -18,7 +18,31 @@ const LIVE_SERP_COST_USD = COST_PER_SERP.live;
  * A setup checker with its own HTTP code and its own parsing can pass while the
  * real ingest fails — which is the opposite of what a setup checker is for.
  */
-const client = createDataForSeoClient();
+/**
+ * The raw body of the last response, captured before Zod touches it.
+ *
+ * The whole point of saving a fixture is to record the REAL shape, including
+ * the fields our schemas strip. Writing the parsed envelope back out would
+ * produce a fixture that agrees with our assumptions by construction — it would
+ * pass every test while telling us nothing about what DataForSEO actually
+ * sends, which is the one question fixtures exist to answer.
+ */
+let lastRawBody: string | null = null;
+
+const capturingFetch: typeof fetch = async (input, init) => {
+  const response = await fetch(input, init);
+  // Tee the body: Response bodies are single-use, so read it here and hand the
+  // caller a fresh Response over the same bytes.
+  const body = await response.text();
+  lastRawBody = body;
+  return new Response(body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+  });
+};
+
+const client = createDataForSeoClient({ fetchImpl: capturingFetch });
 
 /* ── Helpers ──────────────────────────────────────────────────────────────── */
 
@@ -48,8 +72,20 @@ async function checkBalance(): Promise<boolean> {
       return false;
     }
 
-    const perMonth = 13 * 2 * 4 * 30 * 0.0006; // this property's actual footprint
-    console.log(`    At ~$${perMonth.toFixed(2)}/month for the seeded property,`);
+    /*
+     * The seeded property's ACTUAL footprint, read from the seed definition
+     * rather than assumed: primary keywords check every 6 hours (4/day) and the
+     * rest every 12 (2/day), across two targets each.
+     */
+    const primaries = SEED_KEYWORDS.filter((k) => k.isPrimary).length;
+    const secondaries = SEED_KEYWORDS.length - primaries;
+    const targetsPerKeyword = 2;
+    const checksPerDay = (primaries * 4 + secondaries * 2) * targetsPerKeyword;
+    const perMonth = checksPerDay * 30 * COST_PER_SERP.standard;
+    console.log(
+      `    At ~$${perMonth.toFixed(2)}/month for the seeded property ` +
+        `(${checksPerDay} checks/day on the standard queue),`,
+    );
     console.log(`    that is roughly ${Math.floor(balance / perMonth)} months of tracking.`);
     return true;
   } catch (error) {
@@ -172,18 +208,47 @@ async function checkLiveSerp(): Promise<boolean> {
       .map(([k, v]) => (typeof v === 'number' ? `${k}=${v}` : k));
     console.log(`\n    SERP features present: ${present.join(', ') || 'none'}`);
 
-    console.log('\n    Competitors above you:');
-    for (const competitor of parsed.competingDomains.slice(0, 5)) {
+    /*
+     * competingDomains is the top 10 organic results, not "those above us".
+     * Labelling it as the latter would be a small lie in a tool whose entire
+     * premise is labelled numbers.
+     */
+    const above =
+      parsed.rankGroup === null
+        ? parsed.competingDomains
+        : parsed.competingDomains.filter(
+            (c) => c.rank_group !== null && c.rank_group < parsed.rankGroup!,
+          );
+
+    console.log(
+      `\n    ${parsed.rankGroup === null ? 'Top organic results' : 'Organic results above you'}:`,
+    );
+    for (const competitor of above.slice(0, 5)) {
       console.log(`      ${String(competitor.rank_group).padStart(3)}  ${competitor.domain}`);
     }
+    if (above.length === 0) console.log('      (none — you are the top organic result)');
 
-    // Commit the real shape so the parser tests stop running against a guess.
+    // Commit the RAW shape, not the parsed one.
     const dir = path.join(process.cwd(), 'src/test/fixtures/dataforseo');
     await mkdir(dir, { recursive: true });
     const file = path.join(dir, 'live-advanced-real.json');
-    await writeFile(file, JSON.stringify(envelope, null, 2));
-    console.log(`\n    Raw response saved → ${path.relative(process.cwd(), file)}`);
-    console.log('    Commit it — the committed fixtures are hand-written until you do.');
+
+    if (lastRawBody === null) {
+      fail('No raw response was captured; not writing a fixture from parsed output.');
+    } else {
+      // Pretty-print the raw bytes, preserving every field our schemas strip.
+      await writeFile(file, JSON.stringify(JSON.parse(lastRawBody), null, 2));
+      console.log(`\n    Raw response saved → ${path.relative(process.cwd(), file)}`);
+      console.log('    Commit it — the committed fixtures are hand-written until you do.');
+
+      const strippedFields = countStrippedFields(JSON.parse(lastRawBody), envelope);
+      if (strippedFields > 0) {
+        console.log(
+          `    (${strippedFields} field(s) in the real response are stripped by our schemas — ` +
+            'exactly why the raw body is what gets saved.)',
+        );
+      }
+    }
 
     if (typeof task.cost === 'number') console.log(`\n    Actual cost: $${task.cost.toFixed(4)}`);
     return true;
@@ -191,6 +256,29 @@ async function checkLiveSerp(): Promise<boolean> {
     fail(redactError(error));
     return false;
   }
+}
+
+/** How many keys the raw response carries that the parsed one does not. */
+function countStrippedFields(raw: unknown, parsed: unknown): number {
+  if (raw === null || typeof raw !== 'object' || parsed === null || typeof parsed !== 'object') {
+    return 0;
+  }
+
+  if (Array.isArray(raw)) {
+    if (!Array.isArray(parsed)) return 0;
+    return raw.reduce<number>((n, item, i) => n + countStrippedFields(item, parsed[i]), 0);
+  }
+
+  const rawKeys = Object.keys(raw as Record<string, unknown>);
+  const parsedRecord = parsed as Record<string, unknown>;
+  let count = 0;
+
+  for (const key of rawKeys) {
+    if (!(key in parsedRecord)) count++;
+    else count += countStrippedFields((raw as Record<string, unknown>)[key], parsedRecord[key]);
+  }
+
+  return count;
 }
 
 async function main() {

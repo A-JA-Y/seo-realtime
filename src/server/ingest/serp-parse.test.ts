@@ -7,6 +7,7 @@ import notFoundFixture from '@/test/fixtures/dataforseo/live-advanced-not-found.
 import {
   hostnameOf,
   isOwnDomain,
+  normaliseDomain,
   parseProviderDatetime,
   parseSerpResult,
   serpEnvelopeSchema,
@@ -295,5 +296,32 @@ describe('trimSerpPayload', () => {
     const before = JSON.stringify(result).length;
     const after = JSON.stringify(trimmed).length;
     expect(after).toBeLessThan(before / 2);
+  });
+});
+
+describe('normaliseDomain — internationalised domains', () => {
+  it('matches a Unicode property domain against punycoded result URLs', () => {
+    // new URL() punycodes hostnames. A property stored as Unicode would never
+    // match its own results: the site could rank #1 and be recorded as
+    // found=false, indistinguishable from being absent from the top 100.
+    expect(normaliseDomain('例え.jp')).toBe('xn--r8jz45g.jp');
+    expect(isOwnDomain('https://xn--r8jz45g.jp/page', '例え.jp')).toBe(true);
+    expect(isOwnDomain('https://例え.jp/page', '例え.jp')).toBe(true);
+  });
+
+  it('still rejects an IDN lookalike', () => {
+    expect(isOwnDomain('https://not例え.jp/', '例え.jp')).toBe(false);
+  });
+
+  it('strips scheme, path, www and case from a stored domain', () => {
+    expect(normaliseDomain('HTTPS://WWW.Example.com/path')).toBe('example.com');
+    expect(normaliseDomain('  example.com  ')).toBe('example.com');
+  });
+
+  it('returns null for an empty domain rather than matching everything', () => {
+    // A blank property domain matching every result would silently record
+    // every competitor's rank as ours.
+    expect(normaliseDomain('')).toBeNull();
+    expect(isOwnDomain('https://anything.com/', '')).toBe(false);
   });
 });

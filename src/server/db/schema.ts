@@ -197,7 +197,26 @@ export const keywordTargets = pgTable(
     device: deviceType('device').notNull(),
     checkIntervalMin: integer('check_interval_min').notNull().default(360),
     isActive: boolean('is_active').notNull().default(true),
+    /** When a RESULT last landed. Advanced by the pingback, not by submission. */
     lastCheckedAt: timestamp('last_checked_at', { withTimezone: true, mode: 'date' }),
+    /**
+     * When this target was last SUBMITTED to the provider.
+     *
+     * Separate from `last_checked_at` because submission is what costs money
+     * and a result may never arrive. Without it, a target whose pingback is
+     * lost — a failed task, a misconfigured webhook — stays permanently "due"
+     * and is re-submitted and re-billed on every single run, forever, with
+     * nothing to show for it.
+     */
+    lastEnqueuedAt: timestamp('last_enqueued_at', { withTimezone: true, mode: 'date' }),
+    /**
+     * When a LIVE check-now last ran for this target.
+     *
+     * Its own column so the cooldown can be claimed atomically in one
+     * conditional UPDATE. Deriving it from `serp_checks` makes the check a
+     * read-then-act race, and two simultaneous button presses both pay.
+     */
+    lastLiveCheckAt: timestamp('last_live_check_at', { withTimezone: true, mode: 'date' }),
     createdAt: createdAt(),
   },
   (t) => [
@@ -372,14 +391,28 @@ export const serpChecks = pgTable(
 );
 
 /** Raw payloads live apart so retention can prune them without touching the series. */
-export const serpPayloads = pgTable('serp_payloads', {
-  id: bigserial('id', { mode: 'number' }).primaryKey(),
-  serpCheckId: bigint('serp_check_id', { mode: 'number' })
-    .notNull()
-    .references(() => serpChecks.id, { onDelete: 'cascade' }),
-  payload: jsonb('payload').notNull(),
-  createdAt: createdAt(),
-});
+export const serpPayloads = pgTable(
+  'serp_payloads',
+  {
+    id: bigserial('id', { mode: 'number' }).primaryKey(),
+    serpCheckId: bigint('serp_check_id', { mode: 'number' })
+      .notNull()
+      .references(() => serpChecks.id, { onDelete: 'cascade' }),
+    payload: jsonb('payload').notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    /*
+     * Exactly one payload per check, enforced rather than intended.
+     *
+     * The write path has no transaction to work with (the Neon HTTP driver has
+     * none), so a delete-then-insert races: two concurrent pingback
+     * redeliveries for the same task both find nothing to delete and both
+     * insert. This turns that into a conflict the upsert resolves.
+     */
+    unique('serp_payloads_one_per_check').on(t.serpCheckId),
+  ],
+);
 
 /* ══════════════════════════════════════════════════════════════════════════
    Rollups (storage control)

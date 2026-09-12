@@ -195,13 +195,15 @@ export function createDataForSeoClient(options: DataForSeoClientOptions = {}): D
         method: 'POST',
         body: tasks,
         /*
-         * task_post is the one non-idempotent call in this codebase: each task
-         * is billed on acceptance. A connection reset after the server accepted
-         * the batch would double-charge on retry, so network-level failures are
-         * NOT retried here. A 429 or 5xx still is — those mean the request was
-         * rejected, not accepted.
+         * task_post is billed on acceptance, which makes almost every retry
+         * unsafe. A connection reset, a 502 from a gateway, or a 504 timeout can
+         * all occur AFTER the backend took the batch — retrying then pays for
+         * every task twice with no second set of results.
+         *
+         * Only 429 is safe: it means the request was refused outright, never
+         * queued. So: no network retries, and no 5xx retries either.
          */
-        retry: { retryNetworkErrors: false },
+        retry: { retryNetworkErrors: false, isRetryableStatus: (s) => s === 429 },
       });
     },
 
@@ -217,8 +219,9 @@ export function createDataForSeoClient(options: DataForSeoClientOptions = {}): D
       return call('/v3/serp/google/organic/live/advanced', serpEnvelopeSchema, {
         method: 'POST',
         body: [task],
-        // Live is billed per call and is not idempotent either.
-        retry: { retryNetworkErrors: false },
+        // Live is billed per call, and the same ambiguity applies: a 5xx may
+        // arrive after the SERP was fetched and charged.
+        retry: { retryNetworkErrors: false, isRetryableStatus: (s) => s === 429 },
       });
     },
 

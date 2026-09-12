@@ -105,8 +105,30 @@ export function isOwnDomain(url: string | null | undefined, propertyDomain: stri
   const host = hostnameOf(url);
   if (!host) return false;
 
-  const own = propertyDomain.toLowerCase().replace(/^www\./, '').replace(/\/+$/, '');
+  const own = normaliseDomain(propertyDomain);
+  if (!own) return false;
+
   return host === own || host.endsWith(`.${own}`);
+}
+
+/**
+ * Normalise a stored property domain to the form `URL` produces.
+ *
+ * `new URL()` punycodes an internationalised hostname, so a property stored as
+ * Unicode would never match its own results: the site could rank #1 and be
+ * recorded as `found = false` with NULL ranks, indistinguishable from being
+ * absent from the top 100. Round-tripping the stored value through `URL` puts
+ * both sides in the same alphabet.
+ */
+export function normaliseDomain(propertyDomain: string): string | null {
+  const bare = propertyDomain.trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+  if (!bare) return null;
+
+  try {
+    return new URL(`https://${bare}`).hostname.replace(/^www\./, '');
+  } catch {
+    return bare.replace(/^www\./, '');
+  }
 }
 
 /* ══════════════════════════════════════════════════════════════════════════

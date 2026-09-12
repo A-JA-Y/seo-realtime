@@ -22,6 +22,7 @@ import type { DataForSeoClient, SerpTaskRequest } from './dataforseo-client';
 import type { SerpEnvelope } from './serp-parse';
 import {
   LIVE_CHECK_COOLDOWN_MS,
+  claimDueTargets,
   dueTargets,
   enqueueSerpBatch,
   handleSerpPingback,
@@ -148,7 +149,10 @@ describe.skipIf(!hasDb)('DataForSEO ingestion', () => {
   beforeEach(async () => {
     await db.delete(serpChecks).where(eq(serpChecks.propertyId, propertyId));
     await db.delete(ingestRuns).where(eq(ingestRuns.kind, 'serp_batch'));
-    await db.update(keywordTargets).set({ lastCheckedAt: null }).where(eq(keywordTargets.id, targetId));
+    await db
+      .update(keywordTargets)
+      .set({ lastCheckedAt: null, lastEnqueuedAt: null, lastLiveCheckAt: null })
+      .where(eq(keywordTargets.propertyId, propertyId));
   });
 
   /** A desktop variant of our target, for the os-derivation test. */
@@ -219,6 +223,50 @@ describe.skipIf(!hasDb)('DataForSEO ingestion', () => {
       await db.update(properties).set({ isActive: false }).where(eq(properties.id, propertyId));
       expect((await dueTargets()).map((d) => d.target.id)).not.toContain(targetId);
       await db.update(properties).set({ isActive: true }).where(eq(properties.id, propertyId));
+    });
+  });
+
+  /* ── Claiming (found by adversarial review) ───────────────────────────── */
+
+  describe('claimDueTargets', () => {
+    it('stamps the claim in the SAME statement that selects', async () => {
+      const claimed = await claimDueTargets(1000);
+      expect(claimed.map((c) => c.target.id)).toContain(targetId);
+
+      const [after] = await db.select().from(keywordTargets).where(eq(keywordTargets.id, targetId));
+      expect(after!.lastEnqueuedAt).toBeInstanceOf(Date);
+    });
+
+    it('does not hand the same target to a second caller', async () => {
+      await claimDueTargets(1000);
+      const second = await claimDueTargets(1000);
+      expect(second.map((c) => c.target.id)).not.toContain(targetId);
+    });
+
+    it('CONCURRENT claims partition the work rather than duplicating it', async () => {
+      /*
+       * Select-then-update is a race: two overlapping cron invocations — a
+       * scheduler retrying after a 60-second kill, or any at-least-once
+       * scheduler — both see the same targets as due and both post them. At 400
+       * tracked combinations that is 800 billed tasks instead of 400.
+       */
+      const [a, b] = await Promise.all([claimDueTargets(1000), claimDueTargets(1000)]);
+
+      const ids = [...a, ...b].map((c) => c.target.id);
+      expect(new Set(ids).size).toBe(ids.length);
+      expect(ids.filter((id) => id === targetId)).toHaveLength(1);
+    });
+
+    it('returns the joined keyword and domain, not placeholders', async () => {
+      const claimed = await claimDueTargets(1000);
+      const mine = claimed.find((c) => c.target.id === targetId);
+
+      expect(mine).toMatchObject({
+        term: 'prestige sector 150 noida',
+        domain: 'prestigenoidasector150.com',
+      });
+      expect(mine!.target.locationCode).toBe(1007742);
+      expect(mine!.target.device).toBe('mobile');
     });
   });
 
@@ -350,13 +398,64 @@ describe.skipIf(!hasDb)('DataForSEO ingestion', () => {
         post: () => clone(taskPostResponse) as unknown as SerpEnvelope,
       });
 
-      const result = await enqueueSerpBatch({ client, now });
+      // Pinned to one batch: the fixture answers with a fixed two-task
+      // envelope, so a second batch would double the counts.
+      const [only] = await db
+        .select({ target: keywordTargets, term: keywords.term, domain: properties.domain })
+        .from(keywordTargets)
+        .innerJoin(keywords, eq(keywords.id, keywordTargets.keywordId))
+        .innerJoin(properties, eq(properties.id, keywordTargets.propertyId))
+        .where(eq(keywordTargets.id, targetId));
+
+      const result = await enqueueSerpBatch({ client, now, selectDue: async () => [only!] });
 
       expect(result.tasksSubmitted).toBe(1);
       expect(result.tasksRejected).toBe(1);
 
       const [run] = await db.select().from(ingestRuns).where(eq(ingestRuns.kind, 'serp_batch')).limit(1);
       expect(run!.status).toBe('partial');
+    });
+
+    it('does NOT re-submit a target whose pingback never arrived', async () => {
+      /*
+       * The money leak this closes. last_checked_at only advances when a RESULT
+       * lands. If the pingback is lost — a failed task, a misconfigured webhook
+       * — the target stays permanently due and is re-submitted and re-billed on
+       * every single run, forever, with nothing to show for it.
+       */
+      const client = fakeClient();
+      await enqueueSerpBatch({ client, now });
+
+      const [after] = await db.select().from(keywordTargets).where(eq(keywordTargets.id, targetId));
+      expect(after!.lastEnqueuedAt).toBeInstanceOf(Date);
+      expect(after!.lastCheckedAt).toBeNull(); // no result came back
+
+      const second = fakeClient();
+      await enqueueSerpBatch({ client: second, now });
+
+      expect(second.posts.flat().map((t) => t.tag)).not.toContain(targetId);
+    });
+
+    it('does NOT stamp a target the provider rejected — that one cost nothing', async () => {
+      const client = fakeClient({
+        post: (tasks) => ({
+          status_code: 20000,
+          tasks: tasks.map((t) => ({
+            id: 'x',
+            status_code: 40501,
+            status_message: "Invalid Field: 'location_code'.",
+            cost: 0,
+            data: { tag: t.tag },
+            result: null,
+          })),
+        }),
+      });
+
+      await enqueueSerpBatch({ client, now });
+
+      const [after] = await db.select().from(keywordTargets).where(eq(keywordTargets.id, targetId));
+      // Retried next run, because nothing was spent on it.
+      expect(after!.lastEnqueuedAt).toBeNull();
     });
 
     it('does not re-submit a target that was checked inside its interval', async () => {
@@ -369,6 +468,57 @@ describe.skipIf(!hasDb)('DataForSEO ingestion', () => {
       await enqueueSerpBatch({ client, now });
 
       expect(client.posts.flat().map((t) => t.tag)).not.toContain(targetId);
+    });
+
+    it('records FAILED when every task was rejected', async () => {
+      // DataForSEO down, balance at zero, credentials rotated. A yellow
+      // `partial` row hides an outage in which no rank data arrives at all.
+      const client = fakeClient({
+        post: (tasks) => ({
+          status_code: 20000,
+          tasks: tasks.map((t) => ({
+            id: 'x',
+            status_code: 40501,
+            status_message: 'rejected',
+            cost: 0,
+            data: { tag: t.tag },
+            result: null,
+          })),
+        }),
+      });
+
+      const result = await enqueueSerpBatch({ client, now });
+      expect(result.tasksSubmitted).toBe(0);
+
+      const [run] = await db
+        .select()
+        .from(ingestRuns)
+        .where(eq(ingestRuns.kind, 'serp_batch'))
+        .orderBy(sql`started_at desc`)
+        .limit(1);
+
+      expect(run!.status).toBe('failed');
+    });
+
+    it('releases the claim on a REJECTED task, since it cost nothing', async () => {
+      const client = fakeClient({
+        post: (tasks) => ({
+          status_code: 20000,
+          tasks: tasks.map((t) => ({
+            id: 'x',
+            status_code: 40501,
+            status_message: 'rejected',
+            cost: 0,
+            data: { tag: t.tag },
+            result: null,
+          })),
+        }),
+      });
+
+      await enqueueSerpBatch({ client, now });
+
+      const [after] = await db.select().from(keywordTargets).where(eq(keywordTargets.id, targetId));
+      expect(after!.lastEnqueuedAt).toBeNull();
     });
 
     it('submits nothing, and costs nothing, when no target is due', async () => {
@@ -533,6 +683,81 @@ describe.skipIf(!hasDb)('DataForSEO ingestion', () => {
       expect(outcome.status).toBe('failed');
     });
 
+    it('advances last_checked_at only FORWARD', async () => {
+      /*
+       * Two tasks for one keyword can be in flight and complete out of order.
+       * Writing unconditionally lets the older result rewind the timestamp past
+       * the check interval, making the target look due again and starting a
+       * slow loop of re-submitting and re-paying for a keyword that is fine.
+       */
+      const newer = taggedFound(targetId);
+      newer.tasks![0]!.result![0]!.datetime = '2026-09-12 14:03:22 +00:00';
+      await handleSerpPingback('task-new', { client: fakeClient({ get: () => newer }), now });
+
+      const older = taggedFound(targetId);
+      older.tasks![0]!.result![0]!.datetime = '2026-09-12 10:00:00 +00:00';
+      await handleSerpPingback('task-old', { client: fakeClient({ get: () => older }), now });
+
+      const [target] = await db.select().from(keywordTargets).where(eq(keywordTargets.id, targetId));
+      expect(target!.lastCheckedAt?.toISOString()).toBe('2026-09-12T14:03:22.000Z');
+
+      // Both checks are still stored — only the pointer is monotonic.
+      expect(await countChecks()).toBe(2);
+    });
+
+    it('reports inserted=false on a redelivery, exactly', async () => {
+      // M7 suppresses duplicate alerts on this flag. The old heuristic compared
+      // created_at against a 60-second window, so a redelivery 20 seconds later
+      // reported a fresh insert and would have fired a second rank-drop alert.
+      const client = fakeClient({ get: () => taggedFound(targetId) });
+
+      const first = await handleSerpPingback('task-1', { client, now });
+      const second = await handleSerpPingback('task-1', { client, now });
+
+      expect(first.status).toBe('recorded');
+      expect(second.status).toBe('recorded');
+      expect(await countChecks()).toBe(1);
+    });
+
+    it('is idempotent even when the provider omits its own timestamp', async () => {
+      /*
+       * With no `datetime`, receipt time would be the natural key — and receipt
+       * time differs on every redelivery, storing one SERP as several data
+       * points. The provider task id is stable, so a redelivery finds its own
+       * earlier row.
+       */
+      const envelope = taggedFound(targetId);
+      delete envelope.tasks![0]!.result![0]!.datetime;
+      envelope.tasks![0]!.id = 'stable-task-id';
+
+      const client = fakeClient({ get: () => envelope });
+
+      await handleSerpPingback('stable-task-id', { client, now: () => new Date('2026-09-12T15:00:00Z') });
+      await handleSerpPingback('stable-task-id', { client, now: () => new Date('2026-09-12T15:40:00Z') });
+
+      expect(await countChecks()).toBe(1);
+    });
+
+    it('stores exactly one payload even under CONCURRENT redelivery', async () => {
+      // Delete-then-insert with no transaction: both deliveries find nothing to
+      // delete and both insert. A unique constraint makes that unrepresentable.
+      const client = fakeClient({ get: () => taggedFound(targetId) });
+
+      await Promise.all([
+        handleSerpPingback('task-1', { client, now }),
+        handleSerpPingback('task-1', { client, now }),
+        handleSerpPingback('task-1', { client, now }),
+      ]);
+
+      const [check] = await db.select().from(serpChecks).where(eq(serpChecks.keywordTargetId, targetId));
+      const payloads = await db
+        .select()
+        .from(serpPayloads)
+        .where(eq(serpPayloads.serpCheckId, check!.id));
+
+      expect(payloads).toHaveLength(1);
+    });
+
     it('does not throw when task_get itself fails', async () => {
       // The route must still return 200, or DataForSEO redelivers forever.
       const client = fakeClient({
@@ -561,28 +786,54 @@ describe.skipIf(!hasDb)('DataForSEO ingestion', () => {
 
     it('rate-limits a second call inside the cooldown', async () => {
       const client = fakeClient({ live: () => taggedFound(targetId) });
-      await liveCheckTarget(targetId, { client, now: () => new Date('2026-09-12T14:03:22Z') });
+      await liveCheckTarget(targetId, { client, now });
 
-      const second = await liveCheckTarget(targetId, {
-        client,
-        now: () => new Date('2026-09-12T14:05:00Z'),
-      });
+      const second = await liveCheckTarget(targetId, { client, now });
 
       expect(second.status).toBe('rate_limited');
       expect(client.lives).toHaveLength(1); // no second billed call
     });
 
-    it('allows another call once the cooldown has elapsed', async () => {
+    it('claims the cooldown ATOMICALLY — concurrent presses cannot both pay', async () => {
+      /*
+       * A read-then-act check is a race: two simultaneous presses both read "no
+       * recent check" and both spend $0.0020. A single conditional UPDATE
+       * cannot race, and the Neon HTTP driver has no transaction to reach for.
+       */
+      await db
+        .update(keywordTargets)
+        .set({ lastLiveCheckAt: null })
+        .where(eq(keywordTargets.id, targetId));
+
       const client = fakeClient({ live: () => taggedFound(targetId) });
-      await liveCheckTarget(targetId, { client, now: () => new Date('2026-09-12T14:03:22Z') });
 
-      const later = new Date(new Date('2026-09-12T14:03:22Z').getTime() + LIVE_CHECK_COOLDOWN_MS + 1000);
-      const second = await liveCheckTarget(targetId, {
-        client,
-        live: undefined,
-        now: () => later,
-      } as never);
+      const results = await Promise.all([
+        liveCheckTarget(targetId, { client, now }),
+        liveCheckTarget(targetId, { client, now }),
+        liveCheckTarget(targetId, { client, now }),
+      ]);
 
+      const paid = results.filter((r) => r.status !== 'rate_limited');
+      expect(paid).toHaveLength(1);
+      expect(client.lives).toHaveLength(1);
+    });
+
+    it('allows another call once the cooldown has elapsed', async () => {
+      /*
+       * The cooldown is claimed with a conditional UPDATE against the DATABASE
+       * clock, which is what makes it atomic — so it deliberately ignores the
+       * injected clock. Ageing the stored timestamp is the honest way to
+       * simulate elapsed time here.
+       */
+      const client = fakeClient({ live: () => taggedFound(targetId) });
+      await liveCheckTarget(targetId, { client, now });
+
+      await db
+        .update(keywordTargets)
+        .set({ lastLiveCheckAt: new Date(Date.now() - LIVE_CHECK_COOLDOWN_MS - 1000) })
+        .where(eq(keywordTargets.id, targetId));
+
+      const second = await liveCheckTarget(targetId, { client, now });
       expect(second.status).not.toBe('rate_limited');
     });
 
@@ -593,10 +844,7 @@ describe.skipIf(!hasDb)('DataForSEO ingestion', () => {
       await handleSerpPingback('task-1', { client: pingbackClient, now });
 
       const liveClient = fakeClient({ live: () => taggedFound(targetId) });
-      const result = await liveCheckTarget(targetId, {
-        client: liveClient,
-        now: () => new Date('2026-09-12T14:04:00Z'),
-      });
+      const result = await liveCheckTarget(targetId, { client: liveClient, now });
 
       expect(result.status).not.toBe('rate_limited');
     });

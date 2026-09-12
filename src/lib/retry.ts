@@ -100,6 +100,13 @@ export interface RetryOptions {
   maxDelayMs?: number;
   /** Retry connection-level failures that carry no status. Default true. */
   retryNetworkErrors?: boolean;
+  /**
+   * Override which statuses are retried. Defaults to 429 and 5xx.
+   *
+   * Narrowed to 429 only for calls that are billed on acceptance: a 502 or 504
+   * can arrive AFTER the backend took the request, so retrying pays twice.
+   */
+  isRetryableStatus?: (status: number) => boolean;
   /** Label for log lines. */
   label?: string;
   /** Called before each retry. */
@@ -136,6 +143,7 @@ export async function withRetry<T>(fn: () => Promise<T>, options: RetryOptions =
     baseDelayMs = 500,
     maxDelayMs = 10_000,
     retryNetworkErrors = true,
+    isRetryableStatus: retryableStatus = isRetryableStatus,
     label = 'external call',
     onRetry,
     sleep = defaultSleep,
@@ -154,7 +162,7 @@ export async function withRetry<T>(fn: () => Promise<T>, options: RetryOptions =
 
       const status = httpStatusOf(error);
       const retryable =
-        status === undefined ? retryNetworkErrors && isNetworkError(error) : isRetryableStatus(status);
+        status === undefined ? retryNetworkErrors && isNetworkError(error) : retryableStatus(status);
 
       // A 400/401/403/404 is a permanent answer. Rethrow immediately so the
       // caller sees the real status — the dimension fallback depends on it.

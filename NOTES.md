@@ -422,3 +422,179 @@ above. `pnpm verify:dataforseo --live` writes a real capture next to them.
 The headline fixture deliberately reproduces the spec's own example: `rank_group`
 7 but `rank_absolute` 13, with an AI Overview, a local pack, an images block,
 People Also Ask and two ads above — a furniture gap of 6.
+
+---
+
+# M3 — fixes from adversarial review
+
+Thirteen findings across three reviewers; the six that were adversarially
+verified came back **0 refuted**. All thirteen are fixed and covered by
+regression tests. The ones that mattered:
+
+## 37. Nothing claimed a target on submission, so overlapping runs double-billed
+
+`enqueueSerpBatch` selected due targets and then posted them. Two overlapping
+cron invocations — a scheduler retrying after a 60-second kill, or any
+at-least-once scheduler — both saw the same targets as due and both posted
+them. At 400 tracked combinations that is **800 billed tasks instead of 400**,
+every time it happens.
+
+Worse, `last_checked_at` only advances when a *result* lands. A target whose
+pingback was lost (a failed task, a misconfigured webhook) stayed permanently
+due and was re-submitted and re-billed on *every run, forever*, with nothing to
+show for it.
+
+`claimDueTargets` now selects and stamps `last_enqueued_at` in **one statement**
+with `FOR UPDATE SKIP LOCKED`, returning only the rows this invocation won. Two
+concurrent runs partition the work rather than duplicating it — verified
+against a live database, not reasoned about. Selection is gated on
+`last_enqueued_at` as well as `last_checked_at`, so an unhealthy target costs
+exactly its intended cadence and no more. A claim on a *rejected* task is
+released, since nothing was spent on it; a claim on a *failed batch* is held,
+because a 502 or a reset can arrive after the provider accepted and billed it.
+
+## 38. `task_post` retried 5xx, which can double-charge
+
+The original comment claimed "a 429 or 5xx means rejected, not accepted". That
+is true of 429 and **not** true of 5xx: a 502 from a gateway or a 504 timeout
+can arrive after the backend took the batch. Retrying then pays for every task
+twice with no second set of results.
+
+`withRetry` now takes an `isRetryableStatus` override, and both billed-on-
+acceptance calls narrow it to 429 only.
+
+## 39. The live-check cooldown was a read-then-act race
+
+Two simultaneous "check now" presses both read "no recent check" and both spent
+$0.0020. There is no transaction to reach for — the Neon HTTP driver has none —
+so the cooldown is now *claimed* by a single conditional `UPDATE ... RETURNING`
+on a dedicated `keyword_targets.last_live_check_at`. Postgres serialises the
+row; three concurrent presses now yield exactly one billed call.
+
+A consequence worth knowing: the cooldown is enforced against the **database**
+clock, so it deliberately ignores an injected test clock. Tests age the stored
+timestamp instead.
+
+## 40. Concurrent redeliveries created duplicate payload rows
+
+`recordSerpCheck` did `DELETE` then `INSERT` on `serp_payloads` with no
+transaction. Two concurrent redeliveries of the same task both found nothing to
+delete and both inserted. A `UNIQUE (serp_check_id)` constraint plus an upsert
+makes that unrepresentable rather than merely unlikely.
+
+## 41. An out-of-order pingback rewound `last_checked_at`
+
+Two tasks for one keyword can be in flight and complete out of order. Writing
+`last_checked_at` unconditionally let the older result rewind it past the check
+interval, making the target look due again — a slow loop of re-submitting and
+re-paying for a keyword that was perfectly up to date. The update is now
+guarded to advance only forward.
+
+## 42. `inserted` was a 60-second clock heuristic
+
+It compared `created_at` against a one-minute window, so a redelivery arriving
+20 seconds after the original reported a fresh insert. M7's alert engine keys
+duplicate suppression off this flag and would have fired a second "you dropped
+5 positions" alert for the same SERP.
+
+Now `RETURNING (xmax = 0)` — Postgres's own answer to "was this an INSERT or an
+UPDATE".
+
+## 43. `--live` saved the PARSED envelope as the "real shape" fixture
+
+The whole point of capturing a real response is to record the fields our schemas
+*don't* model. Writing `JSON.stringify(envelope)` wrote the parser's projection
+of the response — a fixture that can never falsify the schema, because
+re-parsing it is guaranteed to succeed.
+
+Measured on the committed fixture, the round trip lost envelope
+`version`/`time`/`tasks_count`/`tasks_error`, task `time`/`result_count`/`path`,
+and result `type`/`se_domain`/`check_url`/`spell`/`refinement_chips`/
+`item_types`. The script now tees the raw body through a wrapping `fetchImpl`
+and writes those bytes, and reports how many fields our schemas strip.
+
+## 44. An internationalised domain could never match its own results
+
+`new URL()` punycodes hostnames, so a property stored as Unicode compared
+`xn--r8jz45g.jp` against `例え.jp` and never matched. The site could rank #1 and
+be recorded as `found = false` with NULL ranks — indistinguishable from being
+absent from the top 100. Both sides now normalise through `URL`.
+
+## 45. An all-rejected batch was recorded as `partial`
+
+Same class as NOTES.md §17, in a place I had not applied it: DataForSEO down,
+balance at zero, credentials rotated — a yellow row on `/ops` where there should
+be a red one, while rank data silently stops arriving for every keyword.
+
+---
+
+# M4 — cron, retention and ops
+
+## 46. `/ops` fails CLOSED in production until M5
+
+§10 makes `/ops` agency_admin only and it exposes ingest errors and spend.
+Auth.js lands in M5, so `checkOpsAccess()` is the seam that will hold the real
+session check — and until then it refuses to render in production. Shipping it
+open with a promise to lock it down next milestone is how an internal dashboard
+ends up indexed; a page that refuses is the obvious failure mode to prefer.
+
+## 47. Retention rolls up FIRST, and refuses to delete an unrolled day
+
+Order is the whole design. `pruneSerpChecks` deletes only rows whose day already
+has a rollup — so if the rollup job has been failing silently for a fortnight,
+nothing is destroyed; deletion simply defers.
+
+The pre-prune rollup deliberately has **no lower bound**. An earlier version
+used `CHECK_RETENTION_DAYS + 7`, which created a window of rows too old to be
+rolled up and therefore — because of the guard above — impossible to delete
+either. They accumulated forever, which is the opposite of the job's purpose.
+Caught by a test asserting a two-year-old check still gets removed, and
+mutation-tested to confirm the test fails when the bound returns.
+
+`pruneGscHourly` has the mirror guard: hourly rows are dropped only for dates
+that already carry a `final` row. Without it, a date whose reconciliation never
+ran would lose everything and render as a permanent gap that looks like "no
+impressions".
+
+## 48. Rollup days are cut in the PROPERTY's timezone
+
+`checked_at` is a timestamptz and a day has to be cut somewhere. The property
+timezone is the only defensible choice: "moved today" has to mean what the
+client means by today, and grouping a Noida property's checks by UTC would split
+every Indian evening across two rollup rows.
+
+This is *not* the Pacific-date rule from domain rule 4 — that governs Search
+Console dates, which Google assigns. These are our own timestamps.
+
+Not-found checks count toward `checks_count` but not `found_count`, and are
+excluded from every rank aggregate. Postgres MIN/MAX/AVG skip NULLs, so a day of
+pure misses yields NULL ranks rather than an invented position.
+
+## 49. Raw `db.execute` returns timestamps as STRINGS
+
+Unlike the typed `select()` path, which runs drizzle's column mapper, a raw SQL
+result hands back whatever the driver produced — and the declared row type is a
+promise the query cannot keep. `recentIngestRuns` and `ingestHealth` both
+declared `Date` and got strings; calling `.getTime()` on one threw
+`date.getTime is not a function`, which on `/ops` is a 500 rather than a
+dashboard.
+
+The same class as the numeric-as-string trap from M2, in a different code path.
+Parsed once now, in `toDate`, with tests asserting the returned values really
+are `Date` instances. The page was rendered against real data to confirm it.
+
+## 50. One Vercel cron entry, three daily jobs
+
+`vercel.json` registers only `/api/cron/daily`, which chains reconcile → rollup
+→ prune. Hobby's cron allowance is small and has varied between plan revisions;
+one entry is safe under any of them. Each step stays individually addressable
+for the external scheduler and for manual re-runs.
+
+The hourly work comes from `.github/workflows/ingest.yml` (requirements.md §9,
+Option C). It has a `concurrency` group: every job is idempotent, but two
+concurrent SERP batches would claim disjoint target sets and double the hourly
+spend.
+
+A failed cron returns **500**, so the scheduler's own alerting sees it. That is
+the opposite of the pingback route, where a non-200 makes DataForSEO redeliver
+forever — a scheduler retrying a cron is harmless.

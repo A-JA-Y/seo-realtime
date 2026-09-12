@@ -1,4 +1,4 @@
-import { and, eq, isNull, lt, or, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNull, lt, or, sql } from 'drizzle-orm';
 
 import { env } from '@/lib/env';
 import type { Logger } from '@/lib/logger';
@@ -57,7 +57,9 @@ function deps(overrides: SerpDeps = {}) {
   return {
     client: overrides.client ?? createDataForSeoClient(),
     now: overrides.now ?? (() => new Date()),
-    selectDue: overrides.selectDue ?? dueTargets,
+    // Claims before posting. `dueTargets` is the read-only view, used by the
+    // /ops page and by tests that want to inspect selection without stamping.
+    selectDue: overrides.selectDue ?? claimDueTargets,
   };
 }
 
@@ -91,10 +93,28 @@ export async function dueTargets(limit = MAX_TASKS_PER_POST): Promise<DueTarget[
         eq(keywordTargets.isActive, true),
         eq(keywords.isActive, true),
         eq(properties.isActive, true),
+        // A result has not landed inside the interval...
         or(
           isNull(keywordTargets.lastCheckedAt),
           lt(
             keywordTargets.lastCheckedAt,
+            sql`now() - (${keywordTargets.checkIntervalMin} * interval '1 minute')`,
+          ),
+        ),
+        /*
+         * ...AND we have not already paid for one inside the interval.
+         *
+         * Submission is what costs money; a result may never arrive. Without
+         * this clause a target whose pingback is lost — a task the provider
+         * failed, a misconfigured webhook — stays permanently due and is
+         * re-submitted and re-billed on EVERY run, forever, with nothing to
+         * show for it. Gating on the same interval means an unhealthy target
+         * costs exactly its intended cadence and no more.
+         */
+        or(
+          isNull(keywordTargets.lastEnqueuedAt),
+          lt(
+            keywordTargets.lastEnqueuedAt,
             sql`now() - (${keywordTargets.checkIntervalMin} * interval '1 minute')`,
           ),
         ),
@@ -132,6 +152,82 @@ export interface EnqueueResult {
 }
 
 /**
+ * Atomically claim the targets this run will pay for.
+ *
+ * One statement: select what is due and stamp `last_enqueued_at` in the same
+ * breath, returning only the rows this invocation actually won. A select
+ * followed by a separate update is a race — two overlapping cron invocations
+ * (a scheduler retrying after a 60-second kill, or any at-least-once scheduler)
+ * both see the same targets as due and both post them. At 400 tracked
+ * combinations that is 800 billed tasks instead of 400, every time it happens.
+ *
+ * `FOR UPDATE SKIP LOCKED` means a concurrent run takes different rows rather
+ * than blocking on these — so two overlapping runs split the work instead of
+ * duplicating it.
+ */
+export async function claimDueTargets(limit = MAX_TASKS_PER_POST): Promise<DueTarget[]> {
+  const result = await db.execute<{
+    id: string;
+    keyword_id: string;
+    property_id: string;
+    location_code: number;
+    location_name: string;
+    language_code: string;
+    device: 'desktop' | 'mobile';
+    check_interval_min: number;
+    term: string;
+    domain: string;
+  }>(sql`
+    WITH due AS (
+      SELECT kt.id
+      FROM keyword_targets kt
+      JOIN keywords k   ON k.id = kt.keyword_id
+      JOIN properties p ON p.id = kt.property_id
+      WHERE kt.is_active AND k.is_active AND p.is_active
+        AND (kt.last_checked_at IS NULL
+             OR kt.last_checked_at < now() - (kt.check_interval_min * interval '1 minute'))
+        AND (kt.last_enqueued_at IS NULL
+             OR kt.last_enqueued_at < now() - (kt.check_interval_min * interval '1 minute'))
+      ORDER BY kt.last_checked_at ASC NULLS FIRST
+      LIMIT ${limit}
+      FOR UPDATE OF kt SKIP LOCKED
+    ),
+    claimed AS (
+      UPDATE keyword_targets kt
+      SET last_enqueued_at = now()
+      WHERE kt.id IN (SELECT id FROM due)
+      RETURNING kt.*
+    )
+    SELECT
+      c.id, c.keyword_id, c.property_id, c.location_code, c.location_name,
+      c.language_code, c.device, c.check_interval_min, k.term, p.domain
+    FROM claimed c
+    JOIN keywords k   ON k.id = c.keyword_id
+    JOIN properties p ON p.id = c.property_id
+  `);
+
+  return result.rows.map((row) => ({
+    target: {
+      id: row.id,
+      keywordId: row.keyword_id,
+      propertyId: row.property_id,
+      locationCode: row.location_code,
+      locationName: row.location_name,
+      languageCode: row.language_code,
+      device: row.device,
+      checkIntervalMin: row.check_interval_min,
+      isActive: true,
+      lastCheckedAt: null,
+      lastEnqueuedAt: null,
+      lastLiveCheckAt: null,
+      createdAt: new Date(0),
+    },
+    term: row.term,
+    domain: row.domain,
+  }));
+}
+
+/**
  * Submit every due target, batched (§6).
  *
  * One `task_post` per keyword works and is an explicit anti-pattern: 100 tasks
@@ -162,6 +258,8 @@ export async function enqueueSerpBatch(overrides: SerpDeps = {}): Promise<Enqueu
       try {
         const envelope = await client.taskPost(chunk.map((d) => toTaskRequest(d, pingbackUrl)));
 
+        const rejectedTags: string[] = [];
+
         for (const task of envelope.tasks ?? []) {
           if (isTaskOk(task.status_code)) {
             submitted++;
@@ -172,6 +270,8 @@ export async function enqueueSerpBatch(overrides: SerpDeps = {}): Promise<Enqueu
           // location_code, say. Counting those as submitted would make a
           // keyword silently stop being tracked.
           rejected++;
+          const tag = task.data?.tag;
+          if (typeof tag === 'string') rejectedTags.push(tag);
           run.markPartial(
             `task rejected (${task.status_code}): ${task.status_message ?? 'no message'}`,
           );
@@ -181,10 +281,38 @@ export async function enqueueSerpBatch(overrides: SerpDeps = {}): Promise<Enqueu
             keyword_target_id: task.data?.tag,
           });
         }
+        /*
+         * Release the claim on tasks the provider REJECTED. Those cost nothing,
+         * so holding the claim would delay them by a whole check interval for
+         * no reason. Accepted tasks keep their claim — they were billed.
+         *
+         * In its own try: the batch is already submitted and billed, so a
+         * failure here is a bookkeeping problem, not a batch failure. Counting
+         * it as one would double-count this chunk.
+         */
+        if (rejectedTags.length > 0) {
+          try {
+            await db
+              .update(keywordTargets)
+              .set({ lastEnqueuedAt: null })
+              .where(inArray(keywordTargets.id, rejectedTags));
+          } catch (error) {
+            run.log.warn('could not release the claim on rejected tasks', {
+              rejected: rejectedTags.length,
+              error: redactError(error),
+            });
+          }
+        }
       } catch (error) {
         rejected += chunk.length;
         run.markPartial(`batch failed: ${redactError(error)}`);
-        run.log.error('task_post batch failed', {
+        /*
+         * The claim is deliberately NOT released here. A failed POST is
+         * ambiguous — a 502 or a reset can arrive after the provider accepted
+         * and billed the batch — so releasing would risk paying twice. Holding
+         * costs at most one skipped interval for these targets.
+         */
+        run.log.error('task_post batch failed; claims held to avoid double-billing', {
           batch: batches,
           tasks: chunk.length,
           error: redactError(error),
@@ -201,6 +329,16 @@ export async function enqueueSerpBatch(overrides: SerpDeps = {}): Promise<Enqueu
      * 9); this number exists so a runaway batch is visible immediately rather
      * than five minutes later.
      */
+    /*
+     * A run that submitted nothing at all is an outage — DataForSEO down, the
+     * balance at zero, credentials rotated — not a degradation. Recording it as
+     * `partial` puts a yellow row on /ops where there should be a red one,
+     * while rank data silently stops arriving for every keyword.
+     */
+    if (submitted === 0 && rejected > 0) {
+      run.markFailed(`every task was rejected or failed (${rejected})`);
+    }
+
     const estimatedCostUsd = submitted * COST_PER_SERP.standard;
     run.addCost(estimatedCostUsd);
     run.setMeta({
@@ -257,7 +395,34 @@ export interface RecordCheckResult {
  */
 export async function recordSerpCheck(options: RecordCheckOptions): Promise<RecordCheckResult> {
   const { target, parsed } = options;
-  const checkedAt = parsed.checkedAt ?? options.receivedAt;
+
+  /*
+   * When the provider gives no `datetime`, fall back to the timestamp we
+   * already stored for this task rather than to the current instant.
+   *
+   * Receipt time is not stable across redeliveries, so using it would store the
+   * same SERP two or three times as separate data points — inflating check
+   * counts, spend attribution and any movement the alert engine computes. The
+   * provider task id IS stable, so a redelivery finds its own earlier row.
+   */
+  let checkedAt = parsed.checkedAt;
+
+  if (!checkedAt && options.providerTaskId) {
+    const [existing] = await db
+      .select({ checkedAt: serpChecks.checkedAt })
+      .from(serpChecks)
+      .where(
+        and(
+          eq(serpChecks.keywordTargetId, target.id),
+          eq(serpChecks.providerTaskId, options.providerTaskId),
+        ),
+      )
+      .limit(1);
+
+    checkedAt = existing?.checkedAt ?? null;
+  }
+
+  checkedAt ??= options.receivedAt;
 
   const [row] = await db
     .insert(serpChecks)
@@ -294,25 +459,54 @@ export async function recordSerpCheck(options: RecordCheckOptions): Promise<Reco
         costUsd: sql`excluded.cost_usd`,
       },
     })
-    .returning({ id: serpChecks.id, createdAt: serpChecks.createdAt });
+    /*
+     * `xmax = 0` is Postgres's own answer to "was this an INSERT or an UPDATE":
+     * a freshly inserted tuple has no updating transaction id. The previous
+     * heuristic — comparing created_at against a 60-second window — reported a
+     * redelivery arriving 20 seconds later as a fresh insert, which is exactly
+     * the case M7's alert engine must not fire twice on.
+     */
+    .returning({
+      id: serpChecks.id,
+      inserted: sql<boolean>`(xmax = 0)`,
+    });
 
   if (!row) throw new Error('failed to write serp_checks row');
 
-  // Payloads live in their own table so retention can prune them without
-  // touching the time series (§6). One payload per check, replaced on re-run.
-  await db.delete(serpPayloads).where(eq(serpPayloads.serpCheckId, row.id));
-  await db.insert(serpPayloads).values({ serpCheckId: row.id, payload: options.trimmedPayload });
+  /*
+   * Payloads live in their own table so retention can prune them without
+   * touching the time series (§6). Upserted, not deleted-then-inserted: without
+   * a transaction, two concurrent redeliveries of the same task would both find
+   * nothing to delete and both insert.
+   */
+  await db
+    .insert(serpPayloads)
+    .values({ serpCheckId: row.id, payload: options.trimmedPayload })
+    .onConflictDoUpdate({
+      target: serpPayloads.serpCheckId,
+      set: { payload: sql`excluded.payload`, createdAt: sql`now()` },
+    });
 
+  /*
+   * Advance `last_checked_at` only FORWARD.
+   *
+   * Two tasks for one keyword can be in flight at once — a scheduler overlap,
+   * a provider retry — and they can complete out of order. Writing
+   * unconditionally lets the older result rewind the timestamp past the check
+   * interval, which makes the target look due again and starts a slow loop of
+   * re-submitting and re-paying for a keyword that is perfectly up to date.
+   */
   await db
     .update(keywordTargets)
     .set({ lastCheckedAt: checkedAt })
-    .where(eq(keywordTargets.id, target.id));
+    .where(
+      and(
+        eq(keywordTargets.id, target.id),
+        or(isNull(keywordTargets.lastCheckedAt), lt(keywordTargets.lastCheckedAt, checkedAt)),
+      ),
+    );
 
-  return {
-    serpCheckId: row.id,
-    checkedAt,
-    inserted: row.createdAt.getTime() >= options.receivedAt.getTime() - 60_000,
-  };
+  return { serpCheckId: row.id, checkedAt, inserted: row.inserted };
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -468,27 +662,42 @@ export async function liveCheckTarget(
   if (!joined) return { status: 'failed', reason: 'unknown keyword target' };
 
   /*
-   * The cooldown is derived from the last LIVE check, not from
-   * last_checked_at — that moves on every scheduled pingback too, so using it
-   * would let a scheduled check silently consume the user's manual allowance.
+   * Claim the cooldown ATOMICALLY, before spending anything.
+   *
+   * A read-then-act check is a race: two simultaneous button presses both read
+   * "no recent check" and both pay $0.0020. A single conditional UPDATE cannot
+   * race — Postgres serialises the row — and the Neon HTTP driver has no
+   * interactive transactions to reach for instead.
+   *
+   * Keyed on its own column rather than on `last_checked_at`, which moves on
+   * every scheduled pingback too and would let routine traffic silently consume
+   * the user's manual allowance.
    */
-  const [recent] = await db
-    .select({ checkedAt: serpChecks.checkedAt })
-    .from(serpChecks)
+  const claimed = await db
+    .update(keywordTargets)
+    .set({ lastLiveCheckAt: sql`now()` })
     .where(
       and(
-        eq(serpChecks.keywordTargetId, keywordTargetId),
-        eq(serpChecks.provider, 'dataforseo-live'),
+        eq(keywordTargets.id, keywordTargetId),
+        or(
+          isNull(keywordTargets.lastLiveCheckAt),
+          lt(
+            keywordTargets.lastLiveCheckAt,
+            sql`now() - (${LIVE_CHECK_COOLDOWN_MS} * interval '1 millisecond')`,
+          ),
+        ),
       ),
     )
-    .orderBy(sql`${serpChecks.checkedAt} desc`)
-    .limit(1);
+    .returning({ id: keywordTargets.id });
 
-  if (recent) {
-    const elapsed = at.getTime() - recent.checkedAt.getTime();
-    if (elapsed < LIVE_CHECK_COOLDOWN_MS) {
-      return { status: 'rate_limited', retryAfterMs: LIVE_CHECK_COOLDOWN_MS - elapsed };
-    }
+  if (claimed.length === 0) {
+    const elapsed = joined.target.lastLiveCheckAt
+      ? at.getTime() - joined.target.lastLiveCheckAt.getTime()
+      : 0;
+    return {
+      status: 'rate_limited',
+      retryAfterMs: Math.max(0, LIVE_CHECK_COOLDOWN_MS - elapsed),
+    };
   }
 
   try {
