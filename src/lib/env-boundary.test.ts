@@ -18,13 +18,20 @@ interface Match {
   text: string;
 }
 
+/** This file names the patterns it searches for, so it always matches itself. */
+const SELF = 'src/lib/env-boundary.test.ts';
+
 function gitGrep(pattern: string, paths: string[]): Match[] {
   let raw = '';
   try {
-    raw = execFileSync('git', ['grep', '-n', '-I', '-E', '--', pattern, ...paths], {
-      encoding: 'utf8',
-      cwd: process.cwd(),
-    });
+    // --untracked matters: without it `git grep` searches only committed files,
+    // so brand-new work — exactly the code most likely to contain a fresh
+    // violation — would sail past this guard until someone committed it.
+    raw = execFileSync(
+      'git',
+      ['grep', '-n', '-I', '-E', '--untracked', '--', pattern, ...paths],
+      { encoding: 'utf8', cwd: process.cwd() },
+    );
   } catch (error) {
     // git grep exits 1 when nothing matches, which is a pass, not a failure.
     if ((error as { status?: number }).status === 1) return [];
@@ -50,6 +57,10 @@ function excludingTests(matches: Match[]): Match[] {
   return matches.filter((m) => !m.file.endsWith('.test.ts'));
 }
 
+function excludingSelf(matches: Match[]): Match[] {
+  return matches.filter((m) => m.file !== SELF);
+}
+
 const format = (matches: Match[]) => matches.map((m) => `${m.file}:${m.lineNumber}  ${m.text}`);
 
 describe('anti-pattern guards', () => {
@@ -64,9 +75,11 @@ describe('anti-pattern guards', () => {
       'drizzle.config.ts',
     ]);
 
-    const offenders = excludingTests(
-      excludingComments(
-        gitGrep('process\\.env', ['src', 'scripts', 'drizzle.config.ts', 'next.config.ts']),
+    const offenders = excludingSelf(
+      excludingTests(
+        excludingComments(
+          gitGrep('process\\.env', ['src', 'scripts', 'drizzle.config.ts', 'next.config.ts']),
+        ),
       ),
     ).filter((m) => !ALLOWED.has(m.file));
 
@@ -77,8 +90,8 @@ describe('anti-pattern guards', () => {
   });
 
   it('uses no explicit `any`', () => {
-    const offenders = excludingComments(
-      gitGrep(':[[:space:]]*any\\b|<any>|\\bas any\\b', ['src', 'scripts']),
+    const offenders = excludingSelf(
+      excludingComments(gitGrep(':[[:space:]]*any\\b|<any>|\\bas any\\b', ['src', 'scripts'])),
     );
 
     expect(format(offenders), 'Use `unknown` and narrow it, or write the real type').toEqual([]);
@@ -87,8 +100,10 @@ describe('anti-pattern guards', () => {
   it('never writes a literal 100 as a rank fallback', () => {
     // Domain rule 5 / acceptance criterion 4: "not found" is not position 100.
     // This catches the specific shape of that mistake, e.g. `rankGroup ?? 100`.
-    const offenders = excludingComments(
-      gitGrep('(rank|position)[A-Za-z]*[[:space:]]*(\\?\\?|\\|\\|)[[:space:]]*100\\b', ['src']),
+    const offenders = excludingSelf(
+      excludingComments(
+        gitGrep('(rank|position)[A-Za-z]*[[:space:]]*(\\?\\?|\\|\\|)[[:space:]]*100\\b', ['src']),
+      ),
     );
 
     expect(

@@ -20,7 +20,8 @@
     "test:e2e": "playwright test",
     "verify:gsc": "tsx --env-file-if-exists=.env.local --env-file-if-exists=.env scripts/verify-gsc.ts",
     "verify:dataforseo": "tsx --env-file-if-exists=.env.local --env-file-if-exists=.env scripts/verify-dataforseo.ts",
-    "test:integration": "vitest run src/**/*.integration.test.ts"
+    "test:integration": "vitest run src/**/*.integration.test.ts",
+    "test:tz": "TZ=America/Los_Angeles vitest run"
   },
   "dependencies": {
     "@neondatabase/serverless": "^1.0.1",

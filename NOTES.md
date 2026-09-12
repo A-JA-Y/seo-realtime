@@ -250,3 +250,77 @@ reference does not state whether it is a bare `"13"` or a full
 *literally* out of the string rather than parsing it into a `Date` — a `Date`
 round trip converts through the runtime's local zone and silently shifts the
 hour, which is the class of bug domain rule 4 forbids.
+
+---
+
+# M2 — fixes from adversarial review
+
+Thirteen defects, found by a five-dimension review and confirmed by reading the
+code. Each is now covered by a regression test. The three that mattered most:
+
+## 15. Date arithmetic was runtime-timezone dependent
+
+`shiftDate` and `pacificDate` anchored at UTC midnight and then used date-fns
+`addDays` — which operates in the **runtime's local timezone**. Adding a day to
+a UTC-anchored instant still crosses whatever DST boundary the local zone
+observes, shifting by an hour and landing on the previous UTC day.
+
+The entire suite passed under `TZ=UTC` (the container, and Vercel) and failed
+under `TZ=America/Los_Angeles`. Anyone developing on a US machine would have
+computed the wrong Pacific dates — the exact class of bug domain rule 4 exists
+to prevent, hidden by the one timezone CI happened to run in.
+
+Replaced with `Date.UTC` plus a fixed millisecond offset: UTC has no DST, so a
+day is always exactly 86,400,000 ms. `pnpm test:tz` runs the suite under
+`America/Los_Angeles`, and it is also verified green under `Asia/Kolkata`,
+`Pacific/Chatham` and `Australia/Lord_Howe`.
+
+## 16. `rows_written` lost updates under concurrency
+
+`tally.rows += await upsertGscSnapshots(...)` reads `tally.rows` **before**
+suspending. With six keywords in flight, several read the same stale value and
+all but one update is lost.
+
+Mutation-tested: with the bug, a four-keyword run that writes 8 rows reports 2 —
+a 75% undercount on the figure `/ops` uses to prove ingest is alive. Resolve
+first, then add; no await between the read and the write.
+
+## 17. An all-failed run was recorded as `partial`
+
+`summarise` called `markPartial` per failure and nothing promoted the status, so
+a run in which every keyword failed was indistinguishable from a degraded but
+productive one — a warning on `/ops` where there should be a failure.
+`aggregateStatus` existed for exactly this and was never called. Now it decides,
+and `RunHandle.markFailed` records the outcome without throwing. The backfill
+had the same shape and the same fix.
+
+## The rest
+
+| # | Defect | Consequence |
+|---|---|---|
+| 18 | Deactivating a keyword wedged the property's backfill | `keywordsRemaining` never reached 0; every later run did nothing |
+| 19 | A failing keyword re-attempted the same window at full speed | A hot loop against Google for the whole 45s budget |
+| 20 | The backfill budget was per property, not per invocation | Ten properties asked for 450s inside a 60s function |
+| 21 | The per-date hourly fallback discarded failed dates silently | A partial day stored, run reported `success` |
+| 22 | One keyword's 400 downgraded the whole property, racily | 30 days on the slow path from an unrelated 400 |
+| 23 | `backfilled_at` was stamped for a property with no keywords | A write-once lie that could never be corrected |
+| 24 | Rows committed before a later failure were not counted | Understated `rows_written` |
+| 25 | Two divergent weighted-mean implementations | 7.7% of inputs differed by 0.01, surfacing as a revision Google never made |
+| 26 | `getGscRevisions` ordered oldest-first while documenting newest-first | — |
+| 27 | `keywordsProcessed` counted windows, not keywords | — |
+| 28 | Retry-After was obeyed exactly, with no jitter | Every throttled caller retries at the same instant |
+
+Two reported findings were **refuted** rather than fixed:
+
+- **"`gsc_date` arrives as a JS Date on node-postgres."** It does not. The
+  reviewer grepped `node-postgres/driver.js` and found no type parser, but
+  drizzle installs a per-query `getTypeParser` in `node-postgres/session.js`.
+  Measured against a live Postgres: the value is the string `'2026-09-08'` on
+  both drivers, and the end-to-end read path resolves correctly. The projection
+  through `to_char` and the runtime assertion in `resolveGscSeries` were kept
+  anyway — the behaviour is a library detail the type system cannot check, and
+  the failure it would cause is silent and total.
+
+- **"`withRetry` should default to 4 attempts."** §12 says "3 retries"; §7 says
+  "3 attempts". The default follows §7's more precise wording. `attempts` is a
+  parameter for callers who want the other reading.

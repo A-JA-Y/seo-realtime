@@ -3,6 +3,7 @@ import { formatInTimeZone, fromZonedTime } from 'date-fns-tz';
 import {
   GSC_TIMEZONE,
   dateRange,
+  pacificHourToInstant,
   shiftDate,
   type DateString,
 } from '@/lib/gsc-dates';
@@ -49,7 +50,12 @@ export interface GscSnapshotRow {
   dataState: GscDataState;
   clicks: number;
   impressions: number;
-  ctr: string | number | null;
+  /**
+   * Present for fixture convenience only. The read path NEVER reads it: CTR is
+   * always recomputed from clicks/impressions so the three numbers a tooltip
+   * shows are arithmetically consistent. Optional so the query need not fetch it.
+   */
+  ctr?: string | number | null;
   position: string | number | null;
 }
 
@@ -77,6 +83,16 @@ export interface GscHourCoverage {
    * label 1. `gsc_hour` is a 0-23 label, not an elapsed hour.
    */
   hoursInDay: number;
+  /**
+   * The Pacific day has not finished, so more hour buckets are still to come.
+   *
+   * Deliberately NOT a count-based `isComplete`. Google returns no row for an
+   * hour with no impressions, so `hoursWithData === hoursInDay` is false for
+   * almost every low-volume keyword even on a long-finished day — a warning
+   * that is permanently on is a warning nobody reads. "Has this day ended?" is
+   * answerable exactly, on all three day lengths.
+   */
+  isPartialDay: boolean;
 }
 
 export interface GscSeriesPoint {
@@ -191,6 +207,11 @@ const hoursInDayCache = new Map<DateString, number>();
  * distinct values. Treating it as 25 would make every fall-back day render as
  * permanently incomplete.
  */
+/** The instant a Pacific calendar day ends — i.e. when the next one begins. */
+export function pacificDayEnd(date: DateString): Date {
+  return fromZonedTime(`${shiftDate(date, 1)} 00:00:00`, GSC_TIMEZONE);
+}
+
 export function pacificHourLabelsInDay(date: DateString): number {
   const cached = hoursInDayCache.get(date);
   if (cached !== undefined) return cached;
@@ -233,45 +254,70 @@ function dailyCandidate(row: GscSnapshotRow): GscCandidate {
 }
 
 /**
- * Collapse a date's hourly rows into one impression-weighted reading.
+ * The impression-weighted mean position. THE formula (§5).
  *
- *     position = Σ(position_h × impressions_h) / Σ(impressions_h)
+ *     position = Σ(position_r × impressions_r) / Σ(impressions_r)
  *
- * over only the hours that have BOTH a position and impressions > 0. The
- * denominator is restricted to the same set — dividing by the day's total
- * impressions instead would drag the average toward zero in proportion to how
- * many hours had no position, which is a wrong number that looks like an
- * improvement.
+ * over only the rows that have BOTH a position and impressions > 0. The filter
+ * applies to the DENOMINATOR as well — dividing by the day's total impressions
+ * would drag the average toward zero in proportion to how many impressions
+ * carried no position, which is a wrong number that reads as an improvement on
+ * an inverted rank axis.
  *
- * Weighting matters: an hour with 1 impression at position 3 and an hour with
- * 200 impressions at position 20 is not a day at position 11.5.
+ * Accumulated in integer hundredths — the grid `numeric(6,2)` stores — so the
+ * sum cannot drift before the single division, and the result lands on the same
+ * grid as the stored `final` value it will be diffed against. A float
+ * accumulation plus `toFixed(2)` disagrees with this by 0.01 on exact ties
+ * (`toFixed` rounds on the binary representation, `Math.round` is half-up),
+ * which would surface as a phantom 0.01 "revision" in the AC10 tooltip.
+ *
+ * Exported because the INGEST path needs the identical arithmetic: on the DST
+ * fall-back day two API buckets share hour label 1 and must be folded before
+ * the upsert. Two copies of this formula is two different averages.
  */
-export function aggregateHourlyRows(rows: readonly GscSnapshotRow[]): GscCandidate {
-  let clicks = 0;
-  let impressions = 0;
+export function weightedPosition(
+  rows: readonly { impressions: number; position: string | number | null }[],
+): { position: number | null; positionImpressions: number } {
   let weightedHundredths = 0;
   let positionImpressions = 0;
 
-  // Sort by hour so floating-point accumulation is deterministic regardless of
-  // the order the driver happened to return rows in.
-  const ordered = [...rows].sort((a, b) => (a.gscHour ?? 0) - (b.gscHour ?? 0));
-
-  for (const row of ordered) {
-    clicks += row.clicks;
-    impressions += row.impressions;
-
+  for (const row of rows) {
     const position = toNumber(row.position, 'position');
     if (position === null || row.impressions <= 0) continue;
-
-    // Accumulate in integer hundredths — the grid numeric(6,2) stores — so the
-    // sum does not drift before the single division.
     weightedHundredths += Math.round(position * 100) * row.impressions;
     positionImpressions += row.impressions;
   }
 
+  if (positionImpressions === 0) return { position: null, positionImpressions: 0 };
+  return {
+    position: Math.round(weightedHundredths / positionImpressions) / 100,
+    positionImpressions,
+  };
+}
+
+/**
+ * Collapse a date's hourly rows into one impression-weighted reading.
+ *
+ * Clicks and impressions are plain sums over ALL hours — a zero-impression hour
+ * adds zero but is still an observation. CTR is recomputed from those sums.
+ */
+export function aggregateHourlyRows(rows: readonly GscSnapshotRow[]): GscCandidate {
+  let clicks = 0;
+  let impressions = 0;
+
+  for (const row of rows) {
+    clicks += row.clicks;
+    impressions += row.impressions;
+  }
+
+  // Sort by hour so the accumulation is deterministic regardless of the order
+  // the driver happened to return rows in.
+  const ordered = [...rows].sort((a, b) => (a.gscHour ?? 0) - (b.gscHour ?? 0));
+  const { position, positionImpressions } = weightedPosition(ordered);
+
   return {
     source: 'hourly',
-    position: positionImpressions > 0 ? round2(weightedHundredths / positionImpressions / 100) : null,
+    position,
     clicks,
     impressions,
     ctr: computeCtr(clicks, impressions),
@@ -286,14 +332,25 @@ export function aggregateHourlyRows(rows: readonly GscSnapshotRow[]): GscCandida
 export interface ResolveOptions {
   from: DateString;
   to: DateString;
+  /**
+   * Injectable clock. Affects ONLY `hourCoverage.isPartialDay`. Injected so the
+   * partial-day verdict is testable from fixtures and so one SSR render pass
+   * uses a single consistent instant.
+   */
+  now?: Date;
 }
 
 const MAX_SERIES_DAYS = 1000;
 
-function assertDateString(value: string, label: string): asserts value is DateString {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+function assertDateString(value: unknown, label: string): asserts value is DateString {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    const hint =
+      value instanceof Date
+        ? ' — this is a Date, not a string. The DATE column was parsed by the ' +
+          "driver. Select to_char(gsc_date, 'YYYY-MM-DD') instead of the column."
+        : '';
     throw new GscSeriesDataError(
-      `${label} must be a YYYY-MM-DD Pacific date string, got: ${JSON.stringify(value)}`,
+      `${label} must be a YYYY-MM-DD Pacific date string, got: ${JSON.stringify(value)}${hint}`,
     );
   }
 }
@@ -314,6 +371,7 @@ export function resolveGscSeries(
   options: ResolveOptions,
 ): GscSeriesPoint[] {
   const { from, to } = options;
+  const now = options.now ?? new Date();
   assertDateString(from, 'from');
   assertDateString(to, 'to');
 
@@ -331,6 +389,13 @@ export function resolveGscSeries(
   const byDate = new Map<DateString, { daily: Map<GscDataState, GscSnapshotRow>; hourly: GscSnapshotRow[] }>();
 
   for (const row of rows) {
+    // LOUD, not defensive. Postgres DATE arrives as a JS Date through
+    // node-postgres (pg-types parses OID 1082) while drizzle's PgDateString
+    // declares no mapFromDriverValue and TYPES it `string`. A Date here
+    // compares false against both bounds, then buckets under an object key
+    // that no date string can ever retrieve — every point silently becomes
+    // `source: 'none'`. Typed correctly, invisible to tsc, catastrophic.
+    assertDateString(row.gscDate, 'gsc_snapshots.gsc_date');
     if (row.gscDate < from || row.gscDate > to) continue;
 
     let bucket = byDate.get(row.gscDate);
@@ -395,7 +460,11 @@ export function resolveGscSeries(
       isLowConfidence: winner.positionImpressions < LOW_CONFIDENCE_IMPRESSIONS,
       hourCoverage:
         winner.source === 'hourly' && bucket
-          ? { hoursWithData: bucket.hourly.length, hoursInDay: pacificHourLabelsInDay(date) }
+          ? {
+              hoursWithData: bucket.hourly.length,
+              hoursInDay: pacificHourLabelsInDay(date),
+              isPartialDay: now.getTime() < pacificHourToInstant(shiftDate(date, 1), 0).getTime(),
+            }
           : null,
       provisional: candidates.slice(1),
     };
@@ -409,6 +478,25 @@ export function resolveGscSeries(
  */
 export function isAlertEligible(point: GscSeriesPoint): boolean {
   return point.position !== null && !point.isLowConfidence;
+}
+
+/**
+ * Has this figure stopped moving?
+ *
+ * Deliberately NOT folded into `isAlertEligible`, which implements domain rule 6
+ * and nothing else. Alert policy composes the two:
+ *
+ *     if (isAlertEligible(point) && isSettled(point)) fire(point);
+ *
+ * Hiding the provisional check inside a rule-6 helper would make it invisible;
+ * omitting it entirely lets an alert fire on a three-hours-old Pacific day and
+ * silently self-resolve by evening. Two named predicates make the omission
+ * visible at the call site.
+ */
+export function isSettled(point: GscSeriesPoint): boolean {
+  if (point.source === 'none') return false;
+  if (point.hourCoverage) return !point.hourCoverage.isPartialDay;
+  return !point.isProvisional;
 }
 
 /** Convenience for callers that want yesterday-relative windows. */

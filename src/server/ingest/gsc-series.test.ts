@@ -5,6 +5,7 @@ import {
   LOW_CONFIDENCE_IMPRESSIONS,
   aggregateHourlyRows,
   isAlertEligible,
+  isSettled,
   pacificHourLabelsInDay,
   resolveGscSeries,
   seriesWindow,
@@ -419,7 +420,11 @@ describe('hour coverage', () => {
       '2026-09-11',
     );
 
-    expect(point.hourCoverage).toEqual({ hoursWithData: 2, hoursInDay: 24 });
+    expect(point.hourCoverage).toEqual({
+      hoursWithData: 2,
+      hoursInDay: 24,
+      isPartialDay: false,
+    });
   });
 
   it('reports no coverage once a daily row wins', () => {
@@ -433,7 +438,11 @@ describe('hour coverage', () => {
 
   it('uses the real day length on a DST date', () => {
     const point = one([hourly('2026-03-08', 0, { impressions: 4, position: 18 })], '2026-03-08');
-    expect(point.hourCoverage).toEqual({ hoursWithData: 1, hoursInDay: 23 });
+    expect(point.hourCoverage).toEqual({
+      hoursWithData: 1,
+      hoursInDay: 23,
+      isPartialDay: false,
+    });
   });
 });
 
@@ -538,5 +547,102 @@ describe('the known series for "prestige sector 150 noida"', () => {
     expect(point.provisional).toEqual([
       expect.objectContaining({ source: 'hourly', position: 35, positionImpressions: 4 }),
     ]);
+  });
+});
+
+/* ══════════════════════════════════════════════════════════════════════════
+   Partial days, settledness and the driver DATE trap
+   ══════════════════════════════════════════════════════════════════════════ */
+
+describe('isPartialDay', () => {
+  // 2026-09-12 12:00 PDT — the Pacific day is half over.
+  const midday = new Date('2026-09-12T19:00:00Z');
+
+  it('is true while the Pacific day is still running', () => {
+    const [point] = resolveGscSeries([hourly('2026-09-12', 9, { impressions: 4, position: 8 })], {
+      from: '2026-09-12',
+      to: '2026-09-12',
+      now: midday,
+    });
+
+    expect(point!.hourCoverage).toEqual({
+      hoursWithData: 1,
+      hoursInDay: 24,
+      isPartialDay: true,
+    });
+  });
+
+  it('is false once the Pacific day has ended', () => {
+    const [point] = resolveGscSeries([hourly('2026-09-11', 9, { impressions: 4, position: 8 })], {
+      from: '2026-09-11',
+      to: '2026-09-11',
+      now: midday,
+    });
+
+    expect(point!.hourCoverage!.isPartialDay).toBe(false);
+  });
+
+  it('does NOT claim a quiet finished day is incomplete', () => {
+    // Google returns no row for an hour with no impressions, so 2 of 24 buckets
+    // is normal for a long-tail keyword. A count-based `isComplete` would badge
+    // this permanently; the time-based verdict does not.
+    const [point] = resolveGscSeries(
+      [
+        hourly('2026-09-11', 9, { impressions: 4, position: 8 }),
+        hourly('2026-09-11', 14, { impressions: 2, position: 9 }),
+      ],
+      { from: '2026-09-11', to: '2026-09-11', now: midday },
+    );
+
+    expect(point!.hourCoverage!.hoursWithData).toBe(2);
+    expect(point!.hourCoverage!.isPartialDay).toBe(false);
+  });
+});
+
+describe('isSettled', () => {
+  const midday = new Date('2026-09-12T19:00:00Z');
+  const at = (rows: GscSnapshotRow[], date: string) =>
+    resolveGscSeries(rows, { from: date, to: date, now: midday })[0]!;
+
+  it('is true for a final row', () => {
+    expect(isSettled(at([daily('2026-09-08', 'final', { impressions: 88, position: 13.4 })], '2026-09-08'))).toBe(true);
+  });
+
+  it('is false for a fresh row Google may still revise', () => {
+    expect(isSettled(at([daily('2026-09-11', 'fresh', { impressions: 40, position: 12 })], '2026-09-11'))).toBe(false);
+  });
+
+  it('is false for an hourly point on a day still in progress', () => {
+    expect(isSettled(at([hourly('2026-09-12', 9, { impressions: 9, position: 8 })], '2026-09-12'))).toBe(false);
+  });
+
+  it('is false for a missing date', () => {
+    expect(isSettled(at([], '2026-09-09'))).toBe(false);
+  });
+
+  it('is orthogonal to alert eligibility — an alert needs BOTH', () => {
+    // Well-evidenced, but the day has not finished. Domain rule 6 passes;
+    // firing on it would produce a rank drop that self-resolves by evening.
+    const point = at([hourly('2026-09-12', 9, { impressions: 900, position: 30 })], '2026-09-12');
+    expect(isAlertEligible(point)).toBe(true);
+    expect(isSettled(point)).toBe(false);
+  });
+});
+
+describe('the node-postgres DATE trap', () => {
+  it('THROWS on a Date-valued gsc_date instead of silently dropping the row', () => {
+    // pg-types parses OID 1082 into a JS Date, and drizzle's PgDateString has
+    // no mapFromDriverValue — so the value is a Date while the type says
+    // string. Before this guard the row survived the range filter, bucketed
+    // under an object key, and every date resolved to `source: 'none'`: a real
+    // final row at position 13.40 rendered as "no data", with no error.
+    const row = {
+      ...daily('2026-09-08', 'final', { impressions: 88, position: 13.4 }),
+      gscDate: new Date('2026-09-08T00:00:00Z') as unknown as string,
+    };
+
+    expect(() => resolveGscSeries([row], { from: '2026-09-08', to: '2026-09-08' })).toThrow(
+      /to_char\(gsc_date/,
+    );
   });
 });

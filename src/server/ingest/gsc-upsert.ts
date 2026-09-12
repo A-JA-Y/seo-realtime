@@ -5,6 +5,7 @@ import type { DateString } from '@/lib/gsc-dates';
 import { db } from '@/server/db';
 import { gscSnapshots, type GscDataState, type NewGscSnapshot } from '@/server/db/schema';
 import { parseDateKey, parseHourKey, type GscRow } from './gsc-client';
+import { weightedPosition } from './gsc-series';
 
 /**
  * Mapping Search Console rows into `gsc_snapshots`, idempotently.
@@ -149,17 +150,17 @@ function mergeDuplicates(rows: readonly MappedRow[]): MappedRow[] {
 
     let clicks = 0;
     let impressions = 0;
-    let weighted = 0;
-    let positionImpressions = 0;
 
     for (const row of bucket) {
       clicks += row.clicks;
       impressions += row.impressions;
-      if (row.position !== null && row.impressions > 0) {
-        weighted += Number(row.position) * row.impressions;
-        positionImpressions += row.impressions;
-      }
     }
+
+    // The SAME primitive the read path uses. A second copy of this formula is a
+    // second average: float accumulation plus `toFixed(2)` disagrees with the
+    // integer-hundredths form by 0.01 on exact ties (verified), which would
+    // surface as a phantom revision in the acceptance-criterion-10 tooltip.
+    const { position } = weightedPosition(bucket);
 
     merged.push({
       gscDate: first.gscDate,
@@ -167,7 +168,7 @@ function mergeDuplicates(rows: readonly MappedRow[]): MappedRow[] {
       clicks,
       impressions,
       ctr: (impressions > 0 ? clicks / impressions : 0).toFixed(6),
-      position: positionImpressions > 0 ? (weighted / positionImpressions).toFixed(2) : null,
+      position: position === null ? null : position.toFixed(2),
     });
   }
 

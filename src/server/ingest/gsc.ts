@@ -30,7 +30,7 @@ import {
   type SearchAnalyticsQuery,
 } from './gsc-client';
 import { mapGscRows, upsertGscSnapshots, type MappedRow } from './gsc-upsert';
-import { withIngestRun, type RunHandle } from './runs';
+import { aggregateStatus, withIngestRun, type RunHandle } from './runs';
 
 /**
  * The three Search Console ingest jobs (§5).
@@ -193,7 +193,7 @@ async function fetchHourlyRows(
   dates: DateString[],
   mode: GscDimensionMode,
   log: Logger,
-): Promise<{ rows: MappedRow[]; observedMode: 'combined' | 'per_date' }> {
+): Promise<{ rows: MappedRow[]; observedMode: 'combined' | 'per_date'; failedDates: DateString[] }> {
   const first = dates[0] as DateString;
   const last = dates[dates.length - 1] as DateString;
 
@@ -211,7 +211,7 @@ async function fetchHourlyRows(
         },
         log,
       );
-      return { rows, observedMode: 'combined' };
+      return { rows, observedMode: 'combined' as const, failedDates: [] as DateString[] };
     } catch (error) {
       if (httpStatusOf(error) !== 400) throw error;
       log.info('combined date+hour shape rejected with 400; falling back to one request per date', {
@@ -243,9 +243,15 @@ async function fetchHourlyRows(
     throw failed[0]!.ok === false ? failed[0]!.error : new Error('all per-date requests failed');
   }
 
+  // Dates that failed are NOT silently dropped. Returning their rows as if the
+  // window were complete would store a partial day and report the run as a
+  // success — the silent ingest death §12 names as the worst failure mode.
+  const failedDates = perDate.flatMap((r, i) => (r.ok ? [] : [dates[i] as DateString]));
+
   return {
     rows: perDate.flatMap((r) => (r.ok ? r.value : [])),
-    observedMode: 'per_date',
+    observedMode: 'per_date' as const,
+    failedDates,
   };
 }
 
@@ -312,17 +318,31 @@ export async function ingestGscHourly(propertyId: string, overrides: JobDeps = {
     });
     run.log.info('hourly ingest starting', { dates, keywords: terms.length });
 
-    let observedMode: 'combined' | 'per_date' | null = null;
+    const observedModes: Array<'combined' | 'per_date'> = [];
+    // Rows are tallied as they are COMMITTED, not returned at the end. A
+    // keyword whose second request fails has still written its first request's
+    // rows, and reporting rows_written as 0 for it would understate the run.
+    const tally = { rows: 0 };
 
     const results = await settleWithConcurrency(terms, REQUEST_CONCURRENCY, async (keyword) => {
       const hourly = await fetchHourlyRows(client, property, keyword, dates, mode, run.log);
-      observedMode ??= hourly.observedMode;
+      observedModes.push(hourly.observedMode);
 
-      let written = await upsertGscSnapshots(hourly.rows, {
+      if (hourly.failedDates.length > 0) {
+        run.markPartial(
+          `keyword ${keyword.term}: no hourly data for ${hourly.failedDates.join(', ')}`,
+        );
+      }
+
+      // `tally.rows += await f()` would read tally.rows BEFORE suspending, so
+      // two concurrent keywords both read the old value and one update is lost.
+      // Resolve first, then add — no await between the read and the write.
+      const hourlyWritten = await upsertGscSnapshots(hourly.rows, {
         propertyId,
         keywordId: keyword.id,
         dataState: 'hourly',
       });
+      tally.rows += hourlyWritten;
 
       // Daily-granularity provisional figures. One extra free request.
       const freshRows = await fetchKeywordRows(
@@ -338,22 +358,35 @@ export async function ingestGscHourly(propertyId: string, overrides: JobDeps = {
         run.log,
       );
 
-      written += await upsertGscSnapshots(freshRows, {
+      const freshWritten = await upsertGscSnapshots(freshRows, {
         propertyId,
         keywordId: keyword.id,
         dataState: 'fresh',
       });
-
-      return written;
+      tally.rows += freshWritten;
     });
 
-    // Cache the probe answer so the failing shape is not retried every hour.
+    /*
+     * Cache the probe answer so the failing shape is not retried every hour.
+     *
+     * The property is downgraded to `per_date` only when NOT ONE keyword got
+     * the combined shape to work. Taking whichever keyword happened to finish
+     * first would make the answer a race, and would let a single keyword's 400
+     * — which can have causes other than the dimension combination — downgrade
+     * the whole property for 30 days.
+     */
+    const observedMode = observedModes.includes('combined')
+      ? 'combined'
+      : observedModes.includes('per_date')
+        ? 'per_date'
+        : null;
+
     if (observedMode && (reprobe || property.gscDimensionMode !== observedMode)) {
       await recordDimensionMode(propertyId, observedMode, instant);
       run.log.info('cached Search Console dimension mode', { dimension_mode: observedMode });
     }
 
-    return summarise(run, propertyId, results);
+    return summarise(run, propertyId, results, tally.rows);
   });
 
   return outcome.result;
@@ -384,6 +417,8 @@ export async function reconcileGscFinal(
     run.setMeta({ target_date: target, lag_days: RECONCILE_LAG_DAYS, keywords: terms.length });
     run.log.info('reconciling', { target_date: target, keywords: terms.length });
 
+    const tally = { rows: 0 };
+
     const results = await settleWithConcurrency(terms, REQUEST_CONCURRENCY, async (keyword) => {
       const rows = await fetchKeywordRows(
         client,
@@ -399,10 +434,15 @@ export async function reconcileGscFinal(
         run.log,
       );
 
-      return upsertGscSnapshots(rows, { propertyId, keywordId: keyword.id, dataState: 'final' });
+      const written = await upsertGscSnapshots(rows, {
+        propertyId,
+        keywordId: keyword.id,
+        dataState: 'final',
+      });
+      tally.rows += written;
     });
 
-    return summarise(run, propertyId, results);
+    return summarise(run, propertyId, results, tally.rows);
   });
 
   return outcome.result;
@@ -462,11 +502,20 @@ function nextWindow(
  */
 export async function backfillGsc(
   propertyId: string,
-  overrides: JobDeps & { budgetMs?: number } = {},
+  overrides: JobDeps & { budgetMs?: number; deadline?: number } = {},
 ): Promise<BackfillResult> {
   const { client, now } = deps(overrides);
-  const budgetMs = overrides.budgetMs ?? BACKFILL_BUDGET_MS;
-  const startedAt = Date.now();
+  /*
+   * An ABSOLUTE deadline, not a per-property budget.
+   *
+   * The budget bounds one serverless INVOCATION, and an invocation may cover
+   * several properties. Giving each property its own 45 seconds means ten
+   * properties ask for 450 and the function is killed at 60 — the exact
+   * mid-window kill the budget exists to prevent. A caller running several
+   * properties passes one deadline for all of them.
+   */
+  const deadline = overrides.deadline ?? Date.now() + (overrides.budgetMs ?? BACKFILL_BUDGET_MS);
+  const outOfTime = () => Date.now() >= deadline;
 
   const outcome = await withIngestRun({ kind: 'gsc_backfill', propertyId }, async (run) => {
     const property = await getProperty(propertyId);
@@ -477,42 +526,76 @@ export async function backfillGsc(
     run.setMeta({ floor, months: BACKFILL_MONTHS, keywords: terms.length });
     run.log.info('backfill starting', { floor, keywords: terms.length });
 
-    // Make sure every active keyword has a cursor row.
-    if (terms.length > 0) {
-      await db
-        .insert(gscBackfillCursors)
-        .values(terms.map((k) => ({ keywordId: k.id, propertyId })))
-        .onConflictDoNothing();
+    if (terms.length === 0) {
+      // Nothing to backfill, and nothing to claim. Stamping backfilled_at here
+      // would assert that 16 months of history exists for a property that has
+      // no keywords — and the stamp is write-once, so it could never be
+      // corrected once keywords were added.
+      run.log.info('no active keywords; nothing to backfill');
+      return {
+        propertyId,
+        keywordsProcessed: 0,
+        keywordsFailed: 0,
+        rowsWritten: 0,
+        complete: false,
+        windowsProcessed: 0,
+        keywordsRemaining: 0,
+      };
     }
+
+    const activeIds = new Set(terms.map((k) => k.id));
+
+    await db
+      .insert(gscBackfillCursors)
+      .values(terms.map((k) => ({ keywordId: k.id, propertyId })))
+      .onConflictDoNothing();
 
     let windowsProcessed = 0;
     let rowsWritten = 0;
     let failures = 0;
-    let processed = 0;
+    /** Distinct keywords touched, so keywordsProcessed means what it says. */
+    const attemptedKeywords = new Set<string>();
+
+    /*
+     * Keywords that errored in THIS invocation are set aside for the rest of it.
+     *
+     * A failing window does not advance its cursor — deliberately, so the work
+     * is retried — but without this, the outer loop picks the same keyword up
+     * again immediately and retries the same window at full speed until the
+     * budget runs out. That is a hot loop against Google, wrapped in a retry
+     * policy, hammering an endpoint that has already said no. The next
+     * invocation starts with a clean slate and tries again.
+     */
+    const sidelined = new Set<string>();
 
     // Round-robin across keywords so an interrupted run leaves them at a
     // similar depth rather than one keyword fully done and twelve untouched.
     for (;;) {
-      if (Date.now() - startedAt > budgetMs) {
+      if (outOfTime()) {
         run.log.info('backfill budget exhausted; will resume on the next invocation', {
           windows_processed: windowsProcessed,
         });
         break;
       }
 
-      const pending = await db
-        .select()
-        .from(gscBackfillCursors)
-        .where(
-          and(eq(gscBackfillCursors.propertyId, propertyId), isNull(gscBackfillCursors.completedAt)),
-        );
+      const pending = (
+        await db
+          .select()
+          .from(gscBackfillCursors)
+          .where(
+            and(
+              eq(gscBackfillCursors.propertyId, propertyId),
+              isNull(gscBackfillCursors.completedAt),
+            ),
+          )
+      ).filter((c) => activeIds.has(c.keywordId) && !sidelined.has(c.keywordId));
 
       if (pending.length === 0) break;
 
       let didWork = false;
 
       for (const cursor of pending) {
-        if (Date.now() - startedAt > budgetMs) break;
+        if (outOfTime()) break;
 
         const keyword = terms.find((k) => k.id === cursor.keywordId);
         if (!keyword) continue;
@@ -535,7 +618,7 @@ export async function backfillGsc(
         }
 
         didWork = true;
-        processed++;
+        attemptedKeywords.add(keyword.id);
 
         try {
           const rows = await fetchKeywordRows(
@@ -551,11 +634,12 @@ export async function backfillGsc(
             run.log,
           );
 
-          rowsWritten += await upsertGscSnapshots(rows, {
+          const written = await upsertGscSnapshots(rows, {
             propertyId,
             keywordId: keyword.id,
             dataState: 'final',
           });
+          rowsWritten += written;
 
           // Advance only after the window's rows are committed. A crash before
           // this point re-does the window, which is free: the writes are
@@ -573,8 +657,9 @@ export async function backfillGsc(
           windowsProcessed++;
         } catch (error) {
           failures++;
+          sidelined.add(keyword.id);
           run.markPartial(`keyword ${keyword.term}: ${redactError(error)}`);
-          run.log.error('backfill window failed', {
+          run.log.error('backfill window failed; skipping this keyword until the next run', {
             keyword_id: keyword.id,
             start_date: window.startDate,
             end_date: window.endDate,
@@ -586,14 +671,22 @@ export async function backfillGsc(
       if (!didWork) break;
     }
 
-    const [remaining] = await db
-      .select({ n: sql<number>`count(*)::int` })
+    /*
+     * Only ACTIVE keywords count toward "remaining".
+     *
+     * A deactivated keyword keeps its open cursor — deactivation is reversible
+     * and marking it complete would be a lie — but counting it would leave the
+     * property permanently incomplete, and every future invocation would
+     * re-select it, find no matching keyword, do nothing, and exit.
+     */
+    const openCursors = await db
+      .select({ keywordId: gscBackfillCursors.keywordId })
       .from(gscBackfillCursors)
       .where(
         and(eq(gscBackfillCursors.propertyId, propertyId), isNull(gscBackfillCursors.completedAt)),
       );
 
-    const keywordsRemaining = remaining?.n ?? 0;
+    const keywordsRemaining = openCursors.filter((c) => activeIds.has(c.keywordId)).length;
     const complete = keywordsRemaining === 0;
 
     // §5: "Set properties.backfilled_at on completion." Only on completion, and
@@ -608,10 +701,17 @@ export async function backfillGsc(
     run.addRows(rowsWritten);
     run.setMeta({ windows_processed: windowsProcessed, keywords_remaining: keywordsRemaining, complete });
 
+    // A run in which every attempted window failed is an outage, not a
+    // degraded-but-productive run. markPartial has already been called per
+    // failure; this promotes the run status so /ops shows a failure.
+    if (failures > 0 && windowsProcessed === 0) {
+      run.markFailed(`every backfill window failed (${failures} attempt(s))`);
+    }
+
     return {
       propertyId,
-      keywordsProcessed: processed,
-      keywordsFailed: failures,
+      keywordsProcessed: attemptedKeywords.size - sidelined.size,
+      keywordsFailed: sidelined.size,
       rowsWritten,
       complete,
       windowsProcessed,
@@ -629,25 +729,28 @@ export async function backfillGsc(
 function summarise(
   run: RunHandle,
   propertyId: string,
-  results: Array<{ ok: boolean; value?: number; error?: unknown }>,
+  results: Array<{ ok: boolean; error?: unknown }>,
+  rowsWritten: number,
 ): IngestResult {
-  let rowsWritten = 0;
-  let failed = 0;
+  const failures = results.filter((r) => !r.ok);
+  const succeeded = results.length - failures.length;
 
-  for (const result of results) {
-    if (result.ok) rowsWritten += result.value ?? 0;
-    else {
-      failed++;
-      run.markPartial(redactError(result.error));
-    }
+  const status = aggregateStatus({ succeeded, failed: failures.length });
+
+  for (const failure of failures) {
+    const reason = redactError(failure.error);
+    // An all-failed run is an outage, not a degradation. Recording it as
+    // `partial` would show a warning on /ops where it should show a failure.
+    if (status === 'failed') run.markFailed(reason);
+    else run.markPartial(reason);
   }
 
   run.addRows(rowsWritten);
 
   return {
     propertyId,
-    keywordsProcessed: results.length - failed,
-    keywordsFailed: failed,
+    keywordsProcessed: succeeded,
+    keywordsFailed: failures.length,
     rowsWritten,
   };
 }

@@ -1,4 +1,3 @@
-import { addDays } from 'date-fns';
 import { formatInTimeZone, fromZonedTime } from 'date-fns-tz';
 
 /**
@@ -22,6 +21,31 @@ export const GSC_TIMEZONE = 'America/Los_Angeles';
 export type DateString = string;
 
 const DATE_FORMAT = 'yyyy-MM-dd';
+const MS_PER_DAY = 86_400_000;
+
+const DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
+
+/**
+ * Add whole days to a `YYYY-MM-DD` string. Pure calendar arithmetic.
+ *
+ * Deliberately NOT date-fns `addDays`. That operates in the RUNTIME's local
+ * timezone: anchoring at UTC midnight and adding a day still crosses whatever
+ * DST boundary the local zone happens to observe, shifting the instant by an
+ * hour and landing on the previous UTC day. The whole suite passes under
+ * TZ=UTC and fails under TZ=America/Los_Angeles — a bug invisible on Vercel
+ * (which runs UTC) and live for anyone developing on a US machine.
+ *
+ * `Date.UTC` plus a fixed millisecond offset has no such dependency: UTC has no
+ * DST, so a day is always exactly 86,400,000 ms.
+ */
+function shiftUtcDays(date: DateString, days: number): DateString {
+  const match = DATE_PATTERN.exec(date);
+  if (!match) throw new Error(`Not a YYYY-MM-DD date string: ${date}`);
+
+  const [, year, month, day] = match;
+  const anchor = Date.UTC(Number(year), Number(month) - 1, Number(day));
+  return new Date(anchor + days * MS_PER_DAY).toISOString().slice(0, 10) as DateString;
+}
 
 /**
  * The Pacific Time calendar date for an instant, optionally shifted by whole
@@ -32,13 +56,8 @@ const DATE_FORMAT = 'yyyy-MM-dd';
  * wrong day, whereas subtracting a day from `2026-11-02` is unambiguous.
  */
 export function pacificDate(instant: Date = new Date(), offsetDays = 0): DateString {
-  const today = formatInTimeZone(instant, GSC_TIMEZONE, DATE_FORMAT);
-  if (offsetDays === 0) return today;
-
-  // Anchor at UTC midnight so the arithmetic is pure calendar arithmetic,
-  // untouched by any timezone's DST rules.
-  const anchored = new Date(`${today}T00:00:00Z`);
-  return formatInTimeZone(addDays(anchored, offsetDays), 'UTC', DATE_FORMAT);
+  const today = formatInTimeZone(instant, GSC_TIMEZONE, DATE_FORMAT) as DateString;
+  return offsetDays === 0 ? today : shiftUtcDays(today, offsetDays);
 }
 
 /** Today's date in Pacific Time. `pacificToday(-1)` is yesterday. */
@@ -60,11 +79,7 @@ export function reconcileTargetDate(instant: Date = new Date()): DateString {
 
 /** Shift a `YYYY-MM-DD` string by whole days. Never touches a timezone. */
 export function shiftDate(date: DateString, offsetDays: number): DateString {
-  const anchored = new Date(`${date}T00:00:00Z`);
-  if (Number.isNaN(anchored.getTime())) {
-    throw new Error(`Not a YYYY-MM-DD date string: ${date}`);
-  }
-  return formatInTimeZone(addDays(anchored, offsetDays), 'UTC', DATE_FORMAT);
+  return shiftUtcDays(date, offsetDays);
 }
 
 /** Inclusive list of dates from `from` to `to`. Both are Pacific dates. */
@@ -81,7 +96,7 @@ export function dateRange(from: DateString, to: DateString): DateString[] {
 export function daysBetween(from: DateString, to: DateString): number {
   const a = new Date(`${from}T00:00:00Z`).getTime();
   const b = new Date(`${to}T00:00:00Z`).getTime();
-  return Math.round((b - a) / 86_400_000);
+  return Math.round((b - a) / MS_PER_DAY);
 }
 
 /**

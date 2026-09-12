@@ -411,6 +411,134 @@ describe.skipIf(!hasDb)('Search Console ingestion', () => {
     });
   });
 
+  /* ── Failure handling (found by adversarial review) ───────────────────── */
+
+  describe('failure handling', () => {
+    it('records FAILED, not partial, when every keyword fails', async () => {
+      // An all-failed run is an outage. Recording it as `partial` would show a
+      // warning on /ops where it should show a failure.
+      const client = fakeClient(() => Object.assign(new Error('denied'), { status: 403 }));
+
+      const result = await ingestGscHourly(propertyId, { client, now });
+      expect(result.keywordsProcessed).toBe(0);
+
+      const [run] = await db
+        .select()
+        .from(ingestRuns)
+        .where(and(eq(ingestRuns.propertyId, propertyId), eq(ingestRuns.kind, 'gsc_hourly')));
+
+      expect(run!.status).toBe('failed');
+    });
+
+    it('reports PARTIAL when the per-date fallback loses some dates', async () => {
+      // Returning the surviving dates as if the window were complete would
+      // store a partial day and call the run a success.
+      const client = fakeClient((q) => {
+        if (q.dimensions.includes('date') && q.dimensions.includes('hour')) {
+          return Object.assign(new Error('bad combo'), { status: 400 });
+        }
+        if (q.dataState === 'hourly_all') {
+          // The earlier of the two dates fails; the later succeeds.
+          if (q.startDate === '2026-09-11') {
+            return Object.assign(new Error('upstream'), { status: 503 });
+          }
+          return { rows: [row(['13', 'k'], { impressions: 12, position: 9.5 })] };
+        }
+        return { rows: [] };
+      });
+
+      await ingestGscHourly(propertyId, { client, now });
+
+      const [run] = await db
+        .select()
+        .from(ingestRuns)
+        .where(and(eq(ingestRuns.propertyId, propertyId), eq(ingestRuns.kind, 'gsc_hourly')));
+
+      expect(run!.status).toBe('partial');
+      expect(run!.error).toContain('2026-09-11');
+    });
+
+    it('counts rows already committed when a later request for the same keyword fails', async () => {
+      // The hourly rows are on disk before the `fresh` request runs. Reporting
+      // rows_written as 0 for that keyword would understate the run.
+      const client = fakeClient((q) =>
+        q.dataState === 'hourly_all'
+          ? { rows: [row(['2026-09-12', '2026-09-12T08:00:00-07:00', 'k'], { impressions: 31, position: 7.8 })] }
+          : Object.assign(new Error('fresh failed'), { status: 500 }),
+      );
+
+      await ingestGscHourly(propertyId, { client, now });
+
+      const [run] = await db
+        .select()
+        .from(ingestRuns)
+        .where(and(eq(ingestRuns.propertyId, propertyId), eq(ingestRuns.kind, 'gsc_hourly')));
+
+      expect(run!.rowsWritten).toBeGreaterThan(0);
+    });
+
+    it('counts every keyword\'s rows — the tally must not lose concurrent updates', async () => {
+      // `tally.rows += await f()` reads the tally BEFORE suspending, so two
+      // concurrent keywords both read the old value and one update is lost.
+      // With 6-way concurrency and one keyword the bug is invisible.
+      const extras = await db
+        .insert(keywords)
+        .values([
+          { propertyId, term: 'second keyword' },
+          { propertyId, term: 'third keyword' },
+          { propertyId, term: 'fourth keyword' },
+        ])
+        .returning();
+
+      const client = fakeClient((q) =>
+        q.dataState === 'hourly_all'
+          ? { rows: [row(['2026-09-12', '2026-09-12T08:00:00-07:00', 'k'], { impressions: 5, position: 9 })] }
+          : { rows: [row(['2026-09-12', 'k'], { impressions: 7, position: 8 })] },
+      );
+
+      await ingestGscHourly(propertyId, { client, now });
+
+      const actual = await countRows();
+      const [run] = await db
+        .select()
+        .from(ingestRuns)
+        .where(and(eq(ingestRuns.propertyId, propertyId), eq(ingestRuns.kind, 'gsc_hourly')));
+
+      expect(actual).toBe(8); // 4 keywords x (1 hourly + 1 fresh)
+      expect(run!.rowsWritten).toBe(actual);
+
+      for (const extra of extras) await db.delete(keywords).where(eq(keywords.id, extra.id));
+    });
+
+    it('does not let ONE keyword 400 downgrade a property whose other keywords work', async () => {
+      // A 400 can have causes other than the dimension combination. Downgrading
+      // on the first one to arrive makes the answer a race.
+      const [second] = await db
+        .insert(keywords)
+        .values({ propertyId, term: 'odd keyword' })
+        .returning();
+
+      const client = fakeClient((q) => {
+        const term = q.dimensionFilterGroups?.[0]?.filters[0]?.expression;
+        const combined = q.dimensions.includes('date') && q.dimensions.includes('hour');
+        if (combined && term === 'odd keyword') {
+          return Object.assign(new Error('bad filter'), { status: 400 });
+        }
+        if (q.dataState === 'hourly_all') {
+          return { rows: [row(['2026-09-12', '2026-09-12T08:00:00-07:00', 'k'], { impressions: 5, position: 9 })] };
+        }
+        return { rows: [] };
+      });
+
+      await ingestGscHourly(propertyId, { client, now });
+
+      const [after] = await db.select().from(properties).where(eq(properties.id, propertyId));
+      expect(after!.gscDimensionMode).toBe('combined');
+
+      await db.delete(keywords).where(eq(keywords.id, second!.id));
+    });
+  });
+
   /* ── Backfill ─────────────────────────────────────────────────────────── */
 
   describe('backfill', () => {
@@ -481,6 +609,106 @@ describe.skipIf(!hasDb)('Search Console ingestion', () => {
       // backfilled_at must not move on a re-run.
       const [again] = await db.select().from(properties).where(eq(properties.id, propertyId));
       expect(again!.backfilledAt?.getTime()).toBe(stamped?.getTime());
+    });
+
+    it('does not wedge when a keyword is deactivated mid-backfill', async () => {
+      // The cursor stays open — deactivation is reversible, so marking it
+      // complete would be a lie — but counting it would leave the property
+      // permanently incomplete and every future run would do nothing.
+      const [extra] = await db
+        .insert(keywords)
+        .values({ propertyId, term: 'to be retired' })
+        .returning();
+
+      const client = fakeClient((q) => ({
+        rows: [row([q.startDate, 'k'], { impressions: 10, position: 12 })],
+      }));
+
+      await backfillGsc(propertyId, { client, now, budgetMs: 0 });
+      await db.update(keywords).set({ isActive: false }).where(eq(keywords.id, extra!.id));
+
+      const result = await backfillGsc(propertyId, { client, now });
+
+      expect(result.complete).toBe(true);
+      expect(result.keywordsRemaining).toBe(0);
+
+      // The retired keyword's cursor is still open, not falsely completed.
+      const [cursor] = await db
+        .select()
+        .from(gscBackfillCursors)
+        .where(eq(gscBackfillCursors.keywordId, extra!.id));
+      expect(cursor?.completedAt).toBeNull();
+
+      await db.delete(keywords).where(eq(keywords.id, extra!.id));
+    });
+
+    it('sidelines a failing keyword instead of retrying it at full speed', async () => {
+      // A failing window does not advance its cursor, by design. Without
+      // sidelining, the outer loop picks the same keyword up immediately and
+      // hammers Google until the budget runs out.
+      let calls = 0;
+      const client = fakeClient(() => {
+        calls++;
+        return Object.assign(new Error('upstream'), { status: 500 });
+      });
+
+      const result = await backfillGsc(propertyId, { client, now });
+
+      expect(result.complete).toBe(false);
+      // One attempt for the one keyword, not a loop until the 45s budget.
+      expect(calls).toBe(1);
+    });
+
+    it('shares one deadline across properties rather than 45s each', async () => {
+      // Ten properties at 45s each asks for 450 seconds inside a 60-second
+      // function — the exact mid-window kill the budget exists to prevent.
+      const client = fakeClient((q) => ({
+        rows: [row([q.startDate, 'k'], { impressions: 10, position: 12 })],
+      }));
+
+      const deadline = Date.now() - 1; // already expired
+      const result = await backfillGsc(propertyId, { client, now, deadline });
+
+      expect(result.windowsProcessed).toBe(0);
+      expect(result.complete).toBe(false);
+    });
+
+    it('records FAILED when every backfill window failed', async () => {
+      const client = fakeClient(() => Object.assign(new Error('upstream'), { status: 500 }));
+      await backfillGsc(propertyId, { client, now });
+
+      const [run] = await db
+        .select()
+        .from(ingestRuns)
+        .where(and(eq(ingestRuns.propertyId, propertyId), eq(ingestRuns.kind, 'gsc_backfill')));
+
+      expect(run!.status).toBe('failed');
+    });
+
+    it('does not stamp backfilled_at for a property with no active keywords', async () => {
+      const [org] = await db
+        .insert(organizations)
+        .values({ name: 'Empty', slug: `empty-${randomUUID().slice(0, 8)}` })
+        .returning();
+      const [empty] = await db
+        .insert(properties)
+        .values({
+          orgId: org!.id,
+          name: 'Empty',
+          domain: 'empty.example',
+          gscSiteUrl: `https://empty-${randomUUID().slice(0, 8)}.example/`,
+          gscPropertyType: 'url_prefix',
+        })
+        .returning();
+
+      const result = await backfillGsc(empty!.id, { client: fakeClient(() => ({ rows: [] })), now });
+
+      expect(result.complete).toBe(false);
+
+      const [after] = await db.select().from(properties).where(eq(properties.id, empty!.id));
+      expect(after!.backfilledAt).toBeNull();
+
+      await db.delete(organizations).where(eq(organizations.id, org!.id));
     });
 
     it('backfills a keyword added AFTER the property was marked complete', async () => {

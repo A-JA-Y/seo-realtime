@@ -189,17 +189,38 @@ describe('withRetry', () => {
     await withRetry(fn, {
       baseDelayMs: 100,
       sleep: async (ms) => void delays.push(ms),
-      random: maxJitter,
+      random: () => 0,
     });
 
+    // The server's figure, not our 100ms exponential guess.
     expect(delays).toEqual([1500]);
+  });
+
+  it('never waits LESS than Retry-After asked for, but may wait a little longer', async () => {
+    // Every throttled caller receives the SAME Retry-After, so obeying it
+    // exactly re-synchronises the fleet into one spike at that instant — the
+    // herd this policy exists to break up. The jitter is one-sided: waiting
+    // less than the server asked is not ours to choose.
+    for (const draw of [0, 0.25, 0.5, 1]) {
+      const delays: number[] = [];
+      const fn = failing(1, new HttpError('slow down', 429, { retryAfterMs: 1000 }));
+
+      await withRetry(fn, { sleep: async (ms) => void delays.push(ms), random: () => draw });
+
+      expect(delays[0], `draw ${draw}`).toBeGreaterThanOrEqual(1000);
+      expect(delays[0], `draw ${draw}`).toBeLessThanOrEqual(1200);
+    }
   });
 
   it('still caps a Retry-After that asks for an absurd wait', async () => {
     const delays: number[] = [];
     const fn = failing(1, new HttpError('slow down', 429, { retryAfterMs: 3_600_000 }));
 
-    await withRetry(fn, { maxDelayMs: 5000, sleep: async (ms) => void delays.push(ms) });
+    await withRetry(fn, {
+      maxDelayMs: 5000,
+      sleep: async (ms) => void delays.push(ms),
+      random: maxJitter,
+    });
     expect(delays).toEqual([5000]);
   });
 

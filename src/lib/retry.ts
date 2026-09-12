@@ -3,7 +3,12 @@ import { redactError } from './redact';
 /**
  * Retry policy for external API calls.
  *
- * §12: "Every external call: 3 retries, exponential backoff with jitter, 429/5xx only."
+ * §7: "Wrap every external API call in a retry helper: 3 attempts, exponential
+ * backoff with jitter, retrying only 429 and 5xx." §12 phrases the same rule as
+ * "3 retries". The default here is 3 ATTEMPTS — one call plus two retries —
+ * following §7's more precise wording; `attempts` is a parameter, so a caller
+ * that wants §12's reading passes 4.
+ *
  * §16 anti-pattern: never retry a 4xx other than 429.
  *
  * That asymmetry is the whole point. A 429 means "you were right, just slower";
@@ -155,13 +160,21 @@ export async function withRetry<T>(fn: () => Promise<T>, options: RetryOptions =
       // caller sees the real status — the dimension fallback depends on it.
       if (!retryable || attempt === attempts) throw error;
 
-      // Honour Retry-After when the server sent one; it knows better than our
-      // exponential guess. Still jittered against the ceiling so a fleet of
-      // callers handed the same Retry-After does not re-converge.
+      /*
+       * Honour Retry-After when the server sent one; it knows better than our
+       * exponential guess.
+       *
+       * Still jittered. Every throttled caller receives the SAME Retry-After
+       * value, so obeying it exactly re-synchronises the whole fleet into one
+       * spike at that instant — the herd this policy exists to break up. The
+       * jitter here is additive and one-sided (wait at least as long as asked,
+       * up to 20% longer) rather than the full jitter used for our own backoff,
+       * because waiting LESS than the server asked for is not ours to choose.
+       */
       const suggested = error instanceof HttpError ? error.retryAfterMs : undefined;
       const delayMs =
         suggested !== undefined
-          ? Math.min(suggested, maxDelayMs)
+          ? Math.min(Math.round(suggested * (1 + 0.2 * random())), maxDelayMs)
           : backoffDelay(attempt, baseDelayMs, maxDelayMs, random);
 
       onRetry?.({

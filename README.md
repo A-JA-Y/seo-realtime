@@ -91,6 +91,7 @@ schema is present.
 | `pnpm build` | Production build |
 | `pnpm typecheck` | `tsc --noEmit`, strict |
 | `pnpm test` | Unit tests. Offline — no network, no database |
+| `pnpm test:tz` | The suite under `TZ=America/Los_Angeles`, to catch timezone-dependent date arithmetic |
 | `TEST_DATABASE_URL=... pnpm test` | Also runs the integration suite against a real Postgres |
 | `pnpm db:generate` | Generate a migration from schema changes |
 | `pnpm db:migrate` | Apply pending migrations (uses the **unpooled** connection) |

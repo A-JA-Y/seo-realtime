@@ -30,6 +30,15 @@ export interface RunHandle {
    * job as a whole did useful work and must not be treated as a failure.
    */
   markPartial(reason: string): void;
+  /**
+   * Mark the run as failed without throwing.
+   *
+   * For a job that completed its own control flow but achieved nothing — every
+   * keyword errored, say. Reporting that as `partial` would make an outage look
+   * like a degradation, and /ops would show a warning where it should show a
+   * failure.
+   */
+  markFailed(reason: string): void;
   rowsWritten(): number;
 }
 
@@ -87,6 +96,7 @@ export async function withIngestRun<T>(
   let cost = 0;
   let meta: Record<string, unknown> = { ...(options.meta ?? {}) };
   const partialReasons: string[] = [];
+  const failureReasons: string[] = [];
 
   const handle: RunHandle = {
     id: row.id,
@@ -103,6 +113,9 @@ export async function withIngestRun<T>(
     markPartial: (reason) => {
       partialReasons.push(reason);
     },
+    markFailed: (reason) => {
+      failureReasons.push(reason);
+    },
     rowsWritten: () => rows,
   };
 
@@ -111,22 +124,26 @@ export async function withIngestRun<T>(
   try {
     const result = await work(handle);
     const durationMs = Date.now() - startedAt;
-    const status: IngestStatus = partialReasons.length > 0 ? 'partial' : 'success';
+
+    const status: IngestStatus =
+      failureReasons.length > 0 ? 'failed' : partialReasons.length > 0 ? 'partial' : 'success';
+    const reasons = [...failureReasons, ...partialReasons];
 
     await finish(row.id, {
       status,
       rows,
       cost,
-      meta: partialReasons.length > 0 ? { ...meta, partial_reasons: partialReasons } : meta,
-      error: partialReasons.length > 0 ? partialReasons.join('; ').slice(0, 2000) : null,
+      meta: reasons.length > 0 ? { ...meta, failure_reasons: reasons } : meta,
+      error: reasons.length > 0 ? reasons.join('; ').slice(0, 2000) : null,
     });
 
-    log[status === 'partial' ? 'warn' : 'info']('run finished', {
+    const level = status === 'failed' ? 'error' : status === 'partial' ? 'warn' : 'info';
+    log[level]('run finished', {
       status,
       duration_ms: durationMs,
       rows_written: rows,
       ...(cost > 0 ? { cost_usd: cost } : {}),
-      ...(partialReasons.length > 0 ? { partial_reasons: partialReasons } : {}),
+      ...(reasons.length > 0 ? { failure_reasons: reasons } : {}),
     });
 
     return { runId: row.id, status, rowsWritten: rows, durationMs, result };
