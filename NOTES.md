@@ -907,3 +907,164 @@ driving the alerts page — a mark-all click during an in-flight refresh.
 
 `readJson()` now turns it into a typed 400, so a malformed request stops
 looking like a server fault in the logs.
+
+---
+
+## M8 — hardening
+
+### 67. `open(p,'w')` truncates before `open(p).read()` runs
+
+Prepending a comment to a generated migration with
+
+```python
+open(p, 'w').write(header + open(p).read())
+```
+
+leaves the file containing only the header. Python evaluates the argument after
+opening for write, and opening for write truncates.
+
+The result was a migration file with its explanatory comment and no
+`CREATE TABLE`. `drizzle-kit migrate` ran it, reported success, recorded it as
+applied — and the table did not exist. `drizzle-kit generate` on the next
+machine would have produced it again.
+
+**A migration recorded as applied that did nothing is worse than one that
+failed.** The failure is loud and local; this one is silent and travels.
+
+Two guards now, in `migrations.integration.test.ts`:
+
+- every journal entry's `.sql` file must contain SQL once comments are
+  stripped;
+- every table declared in `schema.ts` must exist after the migrations run.
+
+Both mutation-tested. The second also catches the opposite drift — a migration
+that creates something `schema.ts` never declared, or a rename on one side only.
+
+### 68. `/api/health` was lying about the schema
+
+The health endpoint held a hand-written list of expected tables. Two
+milestones added tables and the list did not, so the endpoint reported
+`"migrated": true, "tablesPresent": 12, "tablesExpected": 12` against a database
+missing both of them.
+
+A health check that lies about the schema is worse than not having one: it is
+the thing you trust at 2am to tell you whether the deploy landed.
+
+The list is derived from `schema.ts` now, the same way §67's guard is, so it
+cannot fall behind.
+
+### 69. Retries were invisible
+
+`withRetry` accepted a `label` and dropped it; `onRetry` had no production
+consumer. Nothing anywhere recorded that a call had been retried — and retry
+pressure is the earliest signal that a provider is degrading, long before a job
+fails.
+
+The DataForSEO client was even passing `label: path`, so the intent was there
+and the wiring was not. `withRetry` now logs a structured `warn` through the
+existing (redacting) logger, and `label` reaches `onRetry` too.
+
+### 70. The 403 page was unreachable in production
+
+`error.tsx` decided whether to show "No access to this property" by checking
+`error.message`. In production Next REPLACES a server error's message with a
+generic string before the boundary sees it — deliberately, so a stack trace or
+a connection string cannot reach the browser.
+
+So the branch could never be taken in production. A client opening a stale
+bookmark saw "Something went wrong" and a reference number instead of the one
+sentence that would have told them what to do. It worked perfectly in
+development, which is exactly why nothing caught it until an end-to-end test ran
+against a production build.
+
+`ForbiddenError` now carries a `digest`, which Next preserves, and the boundary
+matches on that.
+
+**And the fix broke the build**, informatively: `error.tsx` is a client
+component, so importing the constant from `server/auth/access` pulled `pg` into
+the browser bundle. A constant shared between server and client has to live
+somewhere with no server dependencies — `src/lib/error-digests.ts`.
+
+### 71. Two `<main>` landmarks during a streaming handoff
+
+`loading.tsx` rendered a `<main>`, and so does every page. Next streams, so
+during a navigation both are in the document at once — a document with two main
+landmarks, which to a screen reader is a document with no main content.
+
+Found because Playwright's strict mode refused to guess which `<main>` a
+selector meant. The skeleton is a `<div role="status">` now.
+
+The related test lesson: the keyword list is server-rendered TWICE (a card list
+for phones, a table above `sm`, toggled with CSS so there is no layout shift and
+no client-side branch), so `.first()` resolves to whichever is hidden at the
+current width. The specs filter to `visible: true`, which is also what the
+assertions actually mean.
+
+### 72. `AUTH_URL` must match the served origin exactly
+
+A production server on `:3100` with `AUTH_URL` pointing at `:3000` signs the
+user in successfully and then redirects them to a port nothing is listening on.
+The browser reports `ERR_CONNECTION_REFUSED` **after** a valid login, which
+reads as a broken application rather than a configuration mismatch.
+
+`playwright.config.ts` sets `AUTH_URL` and `APP_BASE_URL` for the server it
+starts, so `pnpm test:e2e` works whatever `.env.local` says. requirements.md
+§11 already says "must match exactly"; this is what that sentence costs when it
+is not followed.
+
+### 73. Rate limits belong in a table, not in memory
+
+An in-memory counter in a serverless deployment enforces the limit PER
+INSTANCE. The effective ceiling is the configured limit multiplied by however
+many instances happen to be warm — so it weakens exactly as load increases,
+which is when it matters.
+
+`api_rate_limits` holds one row per (principal, bucket) and the window start
+MOVES rather than rows accumulating, so the table is proportional to active
+callers rather than to requests. The check is a single upsert that both resets
+an expired window and increments a live one: a read-then-write would let a
+burst of N through the moment two requests interleave, and interleaving is the
+normal case under the load a limit exists for. Verified with ten concurrent
+calls against a limit of four.
+
+It fails OPEN. A rate limiter that takes the API down with it has turned a
+throttle into an outage.
+
+This is deliberately NOT how the "check now" cooldown works. That one guards
+SPENDING and must be exactly once per five minutes per target, so it is claimed
+with a conditional UPDATE on the target row. This one guards effort, and a
+fixed window is the right shape for it.
+
+### 74. A layout's error goes to the PARENT segment's boundary
+
+The property-scoped error boundary at `app/p/[propertyId]/error.tsx` exists
+mainly for one case: someone opens a bookmark for a property they no longer have
+access to, and should read "no access to this property" rather than "something
+went wrong".
+
+It never ran for that case. The tenancy check lives in the property LAYOUT, and
+in the App Router **an error thrown in a layout is caught by the parent
+segment's boundary, not its own** — a layout cannot catch its own failure,
+because the boundary it would use is inside the tree that failed to render.
+
+So every 403 landed in the root `app/error.tsx`, which knew nothing about
+forbidden and rendered the generic apology. Both boundaries now render one
+shared `ErrorView`, which knows the difference.
+
+This is not visible in the code. Nothing about `error.tsx` sitting next to
+`layout.tsx` suggests it will not catch it. An end-to-end test against a
+production build found it in one assertion.
+
+### 75. Two test-harness lessons worth keeping
+
+**`toBeVisible` is wrong for an SVG `<g>`.** A group element has no box of its
+own, so Playwright reports it hidden even while its children are painted. For
+"the axis has rendered", poll the tick COUNT.
+
+**Do not click through a list that is rendered twice.** The keyword list is
+server-rendered as both a phone card list and a table, toggled with CSS so there
+is no layout shift and no client-side branch. A `.first()` click lands on
+whichever is hidden. Filtering to `visible: true` fixes the selector; for a
+setup hook the better answer is to read the href and navigate, because the
+anchor is not what the test is about and the click was the flakiest step in the
+suite.

@@ -3,7 +3,6 @@ import { randomUUID } from 'node:crypto';
 import { and, eq, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
-import { createLogger } from '@/lib/logger';
 import { db } from '@/server/db';
 import {
   gscBackfillCursors,
@@ -18,9 +17,6 @@ import { getGscRevisions, getGscSeries } from './gsc-read';
 import { backfillFloor, backfillGsc, ingestGscHourly, reconcileGscFinal } from './gsc';
 
 const hasDb = Boolean(process.env.TEST_DATABASE_URL);
-
-/** A logger that swallows output so the suite is readable. */
-const quiet = createLogger({}, { minLevel: 'error', sink: () => {} });
 
 /**
  * A fake Search Console that records what was asked and answers from a script.
@@ -561,7 +557,7 @@ describe.skipIf(!hasDb)('Search Console ingestion', () => {
     });
 
     it('never requests a date older than the retention floor', async () => {
-      const client = fakeClient((q) => ({ rows: [] }));
+      const client = fakeClient(() => ({ rows: [] }));
       await backfillGsc(propertyId, { client, now });
 
       const floor = backfillFloor('2026-09-12');

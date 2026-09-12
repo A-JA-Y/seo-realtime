@@ -483,6 +483,32 @@ export const alerts = pgTable(
    Operations
    ══════════════════════════════════════════════════════════════════════════ */
 
+/**
+ * API rate-limit windows (§10).
+ *
+ * In a table, not in memory. Serverless instances are many and short-lived, so
+ * an in-memory counter enforces the limit PER INSTANCE — the effective ceiling
+ * rises with concurrency, which is exactly backwards.
+ *
+ * One row per (principal, bucket); the window start moves rather than rows
+ * accumulating, so the table stays proportional to active callers rather than
+ * to requests.
+ */
+export const apiRateLimits = pgTable(
+  'api_rate_limits',
+  {
+    /** User id, or an anonymous marker. Never an email — this table is joined in logs. */
+    principalKey: text('principal_key').notNull(),
+    /** Which limit: the route family, not the exact path. */
+    bucket: text('bucket').notNull(),
+    windowStartedAt: timestamp('window_started_at', { withTimezone: true, mode: 'date' })
+      .notNull()
+      .defaultNow(),
+    hits: integer('hits').notNull().default(0),
+  },
+  (t) => [primaryKey({ columns: [t.principalKey, t.bucket] })],
+);
+
 export const ingestRuns = pgTable(
   'ingest_runs',
   {

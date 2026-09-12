@@ -1,0 +1,100 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    # The integration and end-to-end suites need a real Postgres. A service
+    # container is cheaper and more deterministic than a shared Neon branch,
+    # which two concurrent runs would fight over.
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: ranktracker
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+        ports:
+          - 5432:5432
+
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/ranktracker
+      DATABASE_URL_UNPOOLED: postgresql://postgres:postgres@127.0.0.1:5432/ranktracker
+      TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/ranktracker
+      # Syntactically valid and obviously fake. Nothing here reaches a real
+      # provider: the unit suite is offline by construction and the end-to-end
+      # suite runs against seeded demo data.
+      GOOGLE_SERVICE_ACCOUNT_EMAIL: ci@ci-project.iam.gserviceaccount.com
+      GOOGLE_PRIVATE_KEY: '-----BEGIN PRIVATE KEY-----\nCI\n-----END PRIVATE KEY-----\n'
+      DATAFORSEO_LOGIN: ci@example.com
+      DATAFORSEO_PASSWORD: ci-password
+      DATAFORSEO_PINGBACK_SECRET: ci-pingback-secret-0000000000000000
+      CRON_SECRET: ci-cron-secret-00000000000000000000
+      APP_BASE_URL: http://127.0.0.1:3100
+      AUTH_SECRET: ci-auth-secret-000000000000000000000000
+      AUTH_URL: http://127.0.0.1:3100
+      SEED_ADMIN_EMAIL: ci-admin@example.com
+      SEED_ADMIN_PASSWORD: ci-admin-password
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Migrate
+        run: pnpm db:migrate
+
+      - name: Unit and integration tests
+        run: pnpm test
+
+      # The suite has caught two timezone bugs that passed under UTC, which is
+      # what CI and Vercel both run. Search Console dates are Pacific; a date
+      # helper that reads the machine's zone is a bug that only shows up for
+      # someone else.
+      - name: Tests under a non-UTC timezone
+        run: pnpm test:tz
+
+      - name: Seed demo data
+        run: |
+          pnpm db:seed
+          pnpm db:demo
+
+      - name: Install Playwright browsers
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: End-to-end tests
+        run: pnpm test:e2e
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 7

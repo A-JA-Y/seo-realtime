@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
 
-import type { GscSeriesPoint } from '@/server/ingest/gsc-series';
 import type { SerpFeatures } from '@/server/ingest/serp-parse';
 import {
   confidenceOf,

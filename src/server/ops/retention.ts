@@ -2,6 +2,7 @@ import { sql } from 'drizzle-orm';
 
 import { db } from '@/server/db';
 import { withIngestRun } from '@/server/ingest/runs';
+import { pruneRateLimits } from '@/server/api/rate-limit';
 import { buildDailyRollups } from './rollups';
 
 /**
@@ -43,6 +44,7 @@ export interface PruneResult {
   payloadsDeleted: number;
   checksDeleted: number;
   gscHourlyDeleted: number;
+  rateLimitsDeleted: number;
   rollupsWritten: number;
 }
 
@@ -117,6 +119,7 @@ export async function runPruneJob(): Promise<PruneResult> {
       payloadsDeleted: 0,
       checksDeleted: 0,
       gscHourlyDeleted: 0,
+      rateLimitsDeleted: 0,
       rollupsWritten: 0,
     };
 
@@ -149,19 +152,32 @@ export async function runPruneJob(): Promise<PruneResult> {
       { name: 'serp_payloads', run: () => pruneSerpPayloads() },
       { name: 'serp_checks', run: () => pruneSerpChecks() },
       { name: 'gsc_hourly', run: () => pruneGscHourly() },
+      /*
+       * Rate-limit windows. Tiny, but unbounded without this: one row per
+       * (principal, bucket) that is never revisited stays for ever, and the
+       * anonymous bucket collects one per key for every caller that ever
+       * knocked.
+       */
+      { name: 'api_rate_limits', run: () => pruneRateLimits() },
     ] as const) {
       try {
         const deleted = await step.run();
         if (step.name === 'serp_payloads') result.payloadsDeleted = deleted;
         else if (step.name === 'serp_checks') result.checksDeleted = deleted;
-        else result.gscHourlyDeleted = deleted;
+        else if (step.name === 'gsc_hourly') result.gscHourlyDeleted = deleted;
+        else result.rateLimitsDeleted = deleted;
       } catch (error) {
         run.markPartial(`${step.name}: ${String(error)}`);
         run.log.error('prune step failed', { step: step.name });
       }
     }
 
-    run.addRows(result.payloadsDeleted + result.checksDeleted + result.gscHourlyDeleted);
+    run.addRows(
+      result.payloadsDeleted +
+        result.checksDeleted +
+        result.gscHourlyDeleted +
+        result.rateLimitsDeleted,
+    );
     run.setMeta({ ...result });
     run.log.info('retention complete', { ...result });
 

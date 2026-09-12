@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { assertKeywordTargetAccess } from '@/server/auth/access';
 import { currentPrincipal } from '@/server/auth/config';
 import { ApiFailure, handleRoute } from '@/server/api/respond';
+import { enforceRateLimit, LIMITS, principalKey } from '@/server/api/rate-limit';
 import { COST_PER_SERP } from '@/server/ingest/dataforseo-client';
 import { LIVE_CHECK_COOLDOWN_MS, liveCheckTarget } from '@/server/ingest/serp';
 
@@ -37,6 +38,11 @@ export async function POST(_request: Request, context: { params: Promise<{ id: s
 
     const principal = await currentPrincipal();
     await assertKeywordTargetAccess(principal, id);
+
+    // Per-target cooldown caps spend per keyword; this caps what one principal
+    // can spend across ALL their keywords. Checked after tenancy, so it cannot
+    // be used to probe which target ids exist.
+    await enforceRateLimit(principalKey(principal), 'spend', LIMITS.spend);
 
     const result = await liveCheckTarget(id);
 

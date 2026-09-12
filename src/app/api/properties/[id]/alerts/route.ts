@@ -2,6 +2,7 @@ import { z } from 'zod';
 
 import { currentPrincipal } from '@/server/auth/config';
 import { handleRoute, readJson } from '@/server/api/respond';
+import { enforceRateLimit, LIMITS, principalKey } from '@/server/api/rate-limit';
 import { forProperty } from '@/server/db/scoped';
 import { listAlerts } from '@/server/dashboard/queries';
 
@@ -29,6 +30,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     // Holding a scope is proof the tenancy check passed, and the scope is what
     // applies the property predicate to the write.
     const scope = await forProperty(await currentPrincipal(), id);
+    await enforceRateLimit(principalKey(scope.principal), 'write', LIMITS.write);
 
     return { status: 'ok', marked: await scope.markAllAlertsRead() };
   });

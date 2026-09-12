@@ -22,7 +22,7 @@ interface Match {
 const SELF = 'src/lib/env-boundary.test.ts';
 
 function gitGrep(pattern: string, paths: string[]): Match[] {
-  let raw = '';
+  let raw: string;
   try {
     // --untracked matters: without it `git grep` searches only committed files,
     // so brand-new work — exactly the code most likely to contain a fresh

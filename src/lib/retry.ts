@@ -1,3 +1,4 @@
+import { logger as rootLogger, type Logger } from './logger';
 import { redactError } from './redact';
 
 /**
@@ -107,10 +108,29 @@ export interface RetryOptions {
    * can arrive AFTER the backend took the request, so retrying pays twice.
    */
   isRetryableStatus?: (status: number) => boolean;
-  /** Label for log lines. */
+  /**
+   * What is being called, for the log line. Endpoint paths, not URLs with
+   * query strings — a query string is where a secret ends up.
+   */
   label?: string;
-  /** Called before each retry. */
-  onRetry?: (info: { attempt: number; delayMs: number; status?: number; error: string }) => void;
+  /**
+   * Where the retry warning goes. Defaults to the root logger, which already
+   * redacts; pass a child to inherit a run_id.
+   *
+   * Retries were previously invisible: `label` was accepted and dropped, and
+   * `onRetry` had no production consumer, so nothing anywhere recorded that a
+   * call had been retried. Retry pressure is the earliest signal that a
+   * provider is degrading, and it was going straight to the floor.
+   */
+  logger?: Logger;
+  /** Called before each retry, in addition to the log line. */
+  onRetry?: (info: {
+    attempt: number;
+    delayMs: number;
+    status?: number;
+    error: string;
+    label: string;
+  }) => void;
   /** Injected for tests — real timers make a retry suite take seconds. */
   sleep?: (ms: number) => Promise<void>;
   /** Injected for tests — jitter must be deterministic under test. */
@@ -145,6 +165,7 @@ export async function withRetry<T>(fn: () => Promise<T>, options: RetryOptions =
     retryNetworkErrors = true,
     isRetryableStatus: retryableStatus = isRetryableStatus,
     label = 'external call',
+    logger = rootLogger,
     onRetry,
     sleep = defaultSleep,
     random = Math.random,
@@ -185,12 +206,24 @@ export async function withRetry<T>(fn: () => Promise<T>, options: RetryOptions =
           ? Math.min(Math.round(suggested * (1 + 0.2 * random())), maxDelayMs)
           : backoffDelay(attempt, baseDelayMs, maxDelayMs, random);
 
-      onRetry?.({
+      const info = {
         attempt,
         delayMs,
         ...(status === undefined ? {} : { status }),
         error: redactError(error),
+        label,
+      };
+
+      logger.warn('retrying an external call', {
+        label,
+        attempt,
+        of: attempts,
+        delay_ms: delayMs,
+        ...(status === undefined ? {} : { status }),
+        error: info.error,
       });
+
+      onRetry?.(info);
 
       await sleep(delayMs);
     }

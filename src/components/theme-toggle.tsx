@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useSyncExternalStore } from 'react';
 import { Monitor, Moon, Sun } from 'lucide-react';
 
 import { cn } from '@/lib/utils';
@@ -33,42 +33,64 @@ const OPTIONS: Array<{ value: Theme; label: string; Icon: typeof Sun }> = [
   { value: 'dark', label: 'Dark', Icon: Moon },
 ];
 
+function isTheme(value: string | null): value is Theme {
+  return value === 'light' || value === 'dark' || value === 'system';
+}
+
+/*
+ * The stored theme is EXTERNAL state — it lives in localStorage, another tab
+ * can change it, and the pre-paint script in the document head has already read
+ * it before React exists. So it is subscribed to, not copied into state inside
+ * an effect: reading it in an effect and calling setState renders the page once
+ * with the wrong theme and again with the right one, which is the flash the
+ * pre-paint script exists to prevent.
+ */
+function subscribe(onChange: () => void) {
+  const media = window.matchMedia('(prefers-color-scheme: dark)');
+  media.addEventListener('change', onChange);
+  // Another tab changing the setting fires `storage` here.
+  window.addEventListener('storage', onChange);
+  return () => {
+    media.removeEventListener('change', onChange);
+    window.removeEventListener('storage', onChange);
+  };
+}
+
+function readStoredTheme(): Theme {
+  try {
+    const stored = window.localStorage.getItem(THEME_STORAGE_KEY);
+    return isTheme(stored) ? stored : 'system';
+  } catch {
+    // A locked-down browser context. The OS preference is a fine fallback.
+    return 'system';
+  }
+}
+
 export function ThemeToggle() {
-  const [theme, setTheme] = useState<Theme>('system');
+  /*
+   * The server snapshot is 'system'. It has to be a constant: the server cannot
+   * know the viewer's stored choice, and returning anything derived from the
+   * browser here is a hydration mismatch.
+   */
+  const theme = useSyncExternalStore(subscribe, readStoredTheme, () => 'system' as Theme);
 
-  useEffect(() => {
-    // localStorage throws in a locked-down browser context; the OS preference is
-    // a perfectly good fallback, so a failure here is not worth a broken page.
-    try {
-      const stored = window.localStorage.getItem(THEME_STORAGE_KEY);
-      if (stored === 'light' || stored === 'dark' || stored === 'system') setTheme(stored);
-    } catch {
-      /* keep 'system' */
-    }
-  }, []);
-
-  useEffect(() => {
-    applyTheme(theme);
-    if (theme !== 'system') return;
-
-    // Follow the OS while it is what we are following.
-    const media = window.matchMedia('(prefers-color-scheme: dark)');
-    const listener = () => applyTheme('system');
-    media.addEventListener('change', listener);
-    return () => media.removeEventListener('change', listener);
-  }, [theme]);
-
-  function choose(next: Theme) {
-    setTheme(next);
+  const choose = useCallback((next: Theme) => {
     try {
       window.localStorage.setItem(THEME_STORAGE_KEY, next);
     } catch {
       /* the choice still applies for this page load */
     }
-  }
+    applyTheme(next);
+    // `storage` does not fire in the tab that wrote it, so nudge the store.
+    window.dispatchEvent(new StorageEvent('storage', { key: THEME_STORAGE_KEY }));
+  }, []);
 
   return (
-    <div className="flex items-center gap-0.5 rounded-md border p-0.5" role="group" aria-label="Theme">
+    <div
+      className="flex items-center gap-0.5 rounded-md border p-0.5"
+      role="group"
+      aria-label="Theme"
+    >
       {OPTIONS.map(({ value, label, Icon }) => (
         <button
           key={value}

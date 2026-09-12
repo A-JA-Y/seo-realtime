@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { assertAlertAccess } from '@/server/auth/access';
 import { currentPrincipal } from '@/server/auth/config';
 import { ApiFailure, handleRoute, readJson } from '@/server/api/respond';
+import { enforceRateLimit, LIMITS, principalKey } from '@/server/api/rate-limit';
 import { forProperty } from '@/server/db/scoped';
 
 export const dynamic = 'force-dynamic';
@@ -33,6 +34,7 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
 
     const principal = await currentPrincipal();
     const { propertyId } = await assertAlertAccess(principal, id);
+    await enforceRateLimit(principalKey(principal), 'write', LIMITS.write);
     const scope = await forProperty(principal, propertyId);
 
     const alert =

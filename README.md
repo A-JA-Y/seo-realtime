@@ -7,7 +7,8 @@ feature rather than a support ticket.
 
 > **Setup first.** [`requirements.md`](./requirements.md) provisions every
 > account and credential this needs, with a verification step after each one.
-> Deliberate deviations from the build spec are recorded in
+> When something is wrong, [`RUNBOOK.md`](./RUNBOOK.md) says what to do about
+> it. Deliberate deviations from the build spec are recorded in
 > [`NOTES.md`](./NOTES.md).
 
 ---
@@ -43,7 +44,7 @@ UI is labelled with its source.
 | **M5 — Auth + tenancy**           | **Complete.** Auth.js credentials, three roles, `assertPropertyAccess`, the `forProperty` scoped builder, cross-tenant tests at the API layer, `/ops` gated to agency_admin                                                                                                                          |
 | **M6 — Dashboard**                | **Complete.** Property picker, overview tiles, keyword table, keyword detail with the dual-series chart and the reconciliation panel, competitors, SERP composition strip, ranking-URL history, "check now", dark mode. Verified against 28 days of synthetic data and eyeballed at 1400px and 400px |
 | **M7 — Alerts**                   | **Complete.** Eight alert types, pure rules, signature-based suppression, automatic and manual resolution, and the in-app feed with mark-read / resolve / mark-all. Its own cron job, chained after the rollup                                                                                       |
-| M8 — Hardening                    | Not started                                                                                                                                                                                                                                                                                          |
+| **M8 — Hardening**                | **Complete.** ESLint (flat config, zero findings), Playwright end-to-end suite on desktop and phone, table-backed API rate limits, error / empty / loading states, migration-integrity guards, and [`RUNBOOK.md`](./RUNBOOK.md)                                                                      |
 
 Pacific-time date handling (`src/lib/gsc-dates.ts`) landed early — the setup
 checker needs it, and it encodes domain rule 4.
@@ -121,11 +122,52 @@ itself satisfy §9's "never a single check", so a day resting on fewer than
 resolved on, because a day you cannot judge is not evidence a condition
 cleared.
 
-**What M8 needs.** Playwright end-to-end coverage (`pnpm test:e2e` is wired but
-there are no specs), API rate limits beyond the check-now cooldown, empty and
-error states on every page, and a runbook. **ESLint is not configured** —
-`pnpm lint` drops into the Next.js setup prompt. That is a real gap and belongs
-here.
+**What M8 built.**
+
+- **ESLint**, flat config, zero findings. The Next plugin directly rather than
+  `eslint-config-next`, which still ships the legacy rushstack patch and will
+  not load under flat config. The repository's OWN rules — the `process.env`
+  boundary, routes reaching past the scoped query layer — stay in
+  `env-boundary.test.ts`, because they are assertions that should fail the
+  suite rather than warnings a lint run can be told to ignore.
+- **Playwright**, desktop and phone, against a real server and a real database
+  seeded with `pnpm db:demo`. It covers the acceptance criteria that are only
+  checkable on screen: that every tile names its source, that a null renders as
+  a gap, that the rank axis really is inverted, that "check now" shows its price
+  before it is pressed.
+- **Rate limits**, in a table rather than in memory — a serverless in-memory
+  counter enforces the limit per instance, so the effective ceiling rises with
+  concurrency, which is backwards. One statement per check, so a burst cannot
+  slip through a read-then-write gap.
+- **Error, empty and loading states** on every page, including a 403 that says
+  what it means.
+- **Migration integrity guards**, after a real near-miss (see NOTES §68).
+- [`RUNBOOK.md`](./RUNBOOK.md) — what to do when something is wrong, written
+  for 02:00.
+
+**Four bugs the end-to-end suite found that nothing else had.**
+
+1. The "no access to this property" page was **unreachable in production**, for
+   two independent reasons. Next replaces a server error's message with a
+   generic string before it reaches `error.tsx`, so a boundary matching on the
+   message works in development and silently stops working in the only
+   environment that matters — it matches on `digest` now. And **an error thrown
+   in a layout is caught by the PARENT segment's boundary**, so the tenancy
+   check in the property layout never reached the property's own boundary at
+   all. Neither is visible in the code.
+2. The loading skeleton was a second `<main>`, so during the streaming handoff
+   the document briefly had two main landmarks — which is a document with no
+   main content as far as a screen reader is concerned.
+3. `/api/health` reported `migrated: true, 12 of 12` against a database missing
+   two tables: the expected-table list was hand-written and had drifted. It is
+   derived from the schema now, and a test proves a migration creates each one.
+4. A migration file was **empty and recorded as applied** — a header comment
+   prepended with `open(p,'w').write(header + open(p).read())`, which truncates
+   before it reads. Two guards now make that impossible to repeat.
+
+**Not done, and deliberately so.** The non-goals from the brief stand: no
+external notification channels, no keyword research, no backlinks, no marketing
+site or billing, and no scraper of our own.
 
 **Standing caveats.** Nothing in this repository has touched a live Google or
 DataForSEO API. Both fixture sets are hand-written and labelled as such. The
@@ -184,6 +226,8 @@ schema is present.
 | `pnpm typecheck`                  | `tsc --noEmit`, strict                                                                |
 | `pnpm test`                       | Unit tests. Offline — no network, no database                                         |
 | `pnpm test:tz`                    | The suite under `TZ=America/Los_Angeles`, to catch timezone-dependent date arithmetic |
+| `pnpm lint`                       | ESLint, flat config. Zero findings is the expected state                              |
+| `pnpm test:e2e`                   | Playwright, desktop + phone. Builds and starts its own server                         |
 | `TEST_DATABASE_URL=... pnpm test` | Also runs the integration suite against a real Postgres                               |
 | `pnpm db:generate`                | Generate a migration from schema changes                                              |
 | `pnpm db:migrate`                 | Apply pending migrations (uses the **unpooled** connection)                           |
@@ -231,6 +275,7 @@ src/
       ops-access.ts   /ops is agency_admin only
     api/
       respond.ts      One typed error shape. 403 never 404, for tenancy
+      rate-limit.ts   Fixed windows in a table — memory is per-instance and lies
     dashboard/
       queries.ts      Every dashboard read, each figure carrying its source
       reconciliation.ts  §8: why the two numbers differ, in words
@@ -267,6 +312,7 @@ src/
   test/
     setup.ts          Offline-by-default test bootstrap
     fixtures/         READ fixtures/README.md — the GSC ones are synthetic
+e2e/                  Playwright specs — the criteria only checkable on screen
 scripts/
   verify-gsc.ts       requirements.md §4
   verify-dataforseo.ts  requirements.md §§6–7

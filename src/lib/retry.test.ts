@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
+import { createLogger } from './logger';
 import {
   HttpError,
   backoffDelay,
@@ -304,5 +305,98 @@ describe('httpErrorFromResponse', () => {
     await response.text();
     const error = await httpErrorFromResponse(response, 'x');
     expect(error.status).toBe(500);
+  });
+});
+
+describe('retry visibility', () => {
+  /*
+   * Retries used to be silent. `label` was accepted and dropped on the floor,
+   * and `onRetry` had no production consumer, so nothing anywhere recorded
+   * that a call had been retried — and retry pressure is the earliest signal
+   * that a provider is degrading.
+   */
+  it('logs every retry, naming what was being called', async () => {
+    const lines: Array<Record<string, unknown>> = [];
+    const logger = createLogger(
+      {},
+      { minLevel: 'debug', sink: (_level, line) => lines.push(JSON.parse(line)) },
+    );
+
+    const fn = vi
+      .fn<() => Promise<string>>()
+      .mockRejectedValueOnce(new HttpError('boom', 503))
+      .mockResolvedValue('ok');
+
+    await withRetry(fn, {
+      label: '/v3/serp/google/organic/task_post',
+      logger,
+      sleep: async () => {},
+      random: () => 0,
+    });
+
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatchObject({
+      level: 'warn',
+      label: '/v3/serp/google/organic/task_post',
+      attempt: 1,
+      status: 503,
+    });
+  });
+
+  it('logs nothing when the call succeeds first time', async () => {
+    const lines: Array<Record<string, unknown>> = [];
+    const logger = createLogger(
+      {},
+      { minLevel: 'debug', sink: (_level, line) => lines.push(JSON.parse(line)) },
+    );
+
+    await withRetry(async () => 'ok', { logger });
+
+    expect(lines).toEqual([]);
+  });
+
+  it('passes the label to onRetry as well, for callers that want it', async () => {
+    const seen: Array<{ label: string }> = [];
+    const logger = createLogger({}, { minLevel: 'error', sink: () => {} });
+
+    const fn = vi
+      .fn<() => Promise<string>>()
+      .mockRejectedValueOnce(new HttpError('boom', 429))
+      .mockResolvedValue('ok');
+
+    await withRetry(fn, {
+      label: 'sites.list',
+      logger,
+      onRetry: (info) => seen.push({ label: info.label }),
+      sleep: async () => {},
+      random: () => 0,
+    });
+
+    expect(seen).toEqual([{ label: 'sites.list' }]);
+  });
+
+  // Acceptance criterion 12: no secret is logged. The label is a path, but a
+  // caller could pass one carrying a query string, so the logger's own
+  // key-aware redaction has to still apply to it.
+  it('redacts a label that carries a secret', async () => {
+    const lines: Array<Record<string, unknown>> = [];
+    const logger = createLogger(
+      {},
+      { minLevel: 'debug', sink: (_level, line) => lines.push(JSON.parse(line)) },
+    );
+
+    const fn = vi
+      .fn<() => Promise<string>>()
+      .mockRejectedValueOnce(new HttpError('boom', 503))
+      .mockResolvedValue('ok');
+
+    await withRetry(fn, {
+      label: '/api/cron/daily?secret=hunter2xxxxxxxxxxxxxxxxxxxxxxxx',
+      logger,
+      sleep: async () => {},
+      random: () => 0,
+    });
+
+    expect(JSON.stringify(lines)).not.toContain('hunter2');
   });
 });

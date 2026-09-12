@@ -1,27 +1,30 @@
-import { sql } from 'drizzle-orm';
+import { getTableName, is, sql } from 'drizzle-orm';
+import { PgTable } from 'drizzle-orm/pg-core';
 import { NextResponse } from 'next/server';
 
 import { redactError } from '@/lib/redact';
 import { db } from '@/server/db';
+import * as schema from '@/server/db/schema';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 
-/** Every table the first migration is expected to create. */
-const EXPECTED_TABLES = [
-  'organizations',
-  'users',
-  'properties',
-  'user_properties',
-  'keywords',
-  'keyword_targets',
-  'gsc_snapshots',
-  'serp_checks',
-  'serp_payloads',
-  'daily_rank_rollups',
-  'alerts',
-  'ingest_runs',
-] as const;
+/**
+ * Every table the application expects, DERIVED from the schema.
+ *
+ * This was a hand-written list and it drifted: two tables were added in later
+ * milestones and the list was not, so the endpoint cheerfully reported
+ * "migrated: true, 12 of 12" on a database missing both. A health check that
+ * lies about the schema is worse than not having one — it is the thing you
+ * trust at 2am to tell you the deploy landed.
+ *
+ * Deriving it means the list cannot fall behind: adding a table to `schema.ts`
+ * adds it here, and `migrations.integration.test.ts` separately proves a
+ * migration actually creates it.
+ */
+const EXPECTED_TABLES: string[] = Object.values(schema)
+  .filter((value) => is(value, PgTable))
+  .map((table) => getTableName(table as PgTable));
 
 /**
  * Liveness + schema check.
@@ -38,7 +41,7 @@ export async function GET() {
       SELECT table_name
       FROM information_schema.tables
       WHERE table_schema = 'public'
-        AND table_name = ANY(${sql.param(EXPECTED_TABLES as unknown as string[])}::text[])
+        AND table_name = ANY(${sql.param(EXPECTED_TABLES)}::text[])
     `);
 
     const present = new Set(result.rows.map((r) => r.table_name));

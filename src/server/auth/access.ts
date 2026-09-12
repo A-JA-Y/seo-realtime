@@ -1,5 +1,6 @@
 import { and, eq, inArray } from 'drizzle-orm';
 
+import { FORBIDDEN_DIGEST } from '@/lib/error-digests';
 import { db } from '@/server/db';
 import { properties, userProperties, type UserRole } from '@/server/db/schema';
 
@@ -31,9 +32,19 @@ export class UnauthorizedError extends Error {
   }
 }
 
+/**
+ * Carries `FORBIDDEN_DIGEST` so `error.tsx` can recognise it.
+ *
+ * Without it the "no access to this property" page was unreachable in
+ * production: the boundary matched on the message, which Next replaces, so a
+ * client opening a stale bookmark saw "Something went wrong" and a reference
+ * number instead of the one sentence that would have told them what to do. It
+ * worked in development, which is why it survived to an end-to-end test.
+ */
 export class ForbiddenError extends Error {
   readonly status = 403;
   readonly code = 'FORBIDDEN';
+  readonly digest = FORBIDDEN_DIGEST;
 
   constructor(message = 'You do not have access to this property') {
     super(message);

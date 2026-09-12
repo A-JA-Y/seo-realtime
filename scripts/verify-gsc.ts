@@ -156,7 +156,6 @@ async function main() {
     const message = redactError(error);
     fail(`sites.list failed: ${message}`);
     printExplanation(message);
-    failures++;
 
     // Every later call uses the same credential, so there is nothing to learn
     // from watching it fail three more times.

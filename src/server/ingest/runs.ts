@@ -1,6 +1,6 @@
 import { eq, sql } from 'drizzle-orm';
 
-import { createLogger, logger as rootLogger, type Logger } from '@/lib/logger';
+import { logger as rootLogger, type Logger } from '@/lib/logger';
 import { redactError } from '@/lib/redact';
 import { db } from '@/server/db';
 import { ingestRuns, type IngestKind, type IngestStatus } from '@/server/db/schema';

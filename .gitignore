@@ -39,3 +39,5 @@ blob-report/
 .idea/
 .vscode/*
 !.vscode/extensions.json
+# playwright browser cache
+playwright/.cache/
