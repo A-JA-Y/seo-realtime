@@ -598,3 +598,108 @@ spend.
 A failed cron returns **500**, so the scheduler's own alerting sees it. That is
 the opposite of the pingback route, where a non-200 makes DataForSEO redeliver
 forever — a scheduler retrying a cron is harmless.
+
+---
+
+# M5 — auth and tenancy
+
+## 51. Property grants are resolved from the DATABASE, not from the token
+
+§10 says to "put `role` and the permitted `property_id` list in the session
+token". The role and organisation are there; the property list is not.
+
+A token is issued at login and lives for its whole lifetime. Putting grants in
+it means revoking a client's access takes effect only at their *next* login —
+so removing someone from an account leaves them reading it for hours. One
+indexed query per check is worth not having that window. It also keeps the
+cookie a fixed size regardless of how many properties an agency manages.
+
+## 52. Organisation is checked before role, for every role
+
+`canAccessProperty` checks that the property belongs to the principal's
+organisation *first*, and that check applies to `agency_admin` too. An admin is
+an admin of their own agency, not of the database. There is a test asserting
+org A's admin cannot read org B's property.
+
+A `client` additionally needs an explicit `user_properties` grant, and a client
+with **no** grants sees nothing — fail-closed, so a half-provisioned account
+leaks nothing.
+
+## 53. A missing resource returns 403, never 404
+
+`assertKeywordAccess` raises `ForbiddenError` both for a keyword in another
+tenant and for one that does not exist. A 404 for the latter would confirm which
+ids exist, turning every id-addressed route into a cross-tenant enumeration
+oracle. The same rule applies to `forProperty`.
+
+## 54. `forProperty` enforces by construction, not by convention
+
+§10 asks that "writing an unscoped query is structurally difficult rather than
+merely discouraged". The structural part is that `forProperty` is **async and
+performs the access check before it returns** — there is no way to obtain a
+scope for a property you cannot read, so a route holding a `PropertyScope` has
+already passed tenancy. The check cannot be forgotten because it is what
+produced the object.
+
+Every builder pre-applies `property_id = <scope>` and a caller's extra predicate
+is **AND**ed, not substituted. There is a test asserting that asking a scope for
+another tenant's keyword by id returns nothing — a `.where()` that replaced the
+scope would silently undo the entire model.
+
+`daily_rank_rollups` has no `property_id` of its own, so its builder joins
+through `keyword_targets`. That is the one table where an unscoped query looks
+perfectly normal.
+
+Backed by a guard test: no file under `src/app` may import the raw `db` handle,
+except the machine-authenticated endpoints (`api/cron`, `api/webhooks`,
+`api/health`, `api/auth`), which hold no session and legitimately operate across
+tenants. Mutation-tested.
+
+## 55. Middleware guards PAGES only — never `/api`
+
+The first version matched `/api` too, and an anonymous `GET /api/properties`
+came back as a **307 to an HTML login page** instead of the typed
+`{"error":{"code":"UNAUTHORIZED"}}` §10 specifies. A `fetch` that follows
+redirects would have received a 200 full of markup, which looks like success.
+
+Found by actually driving the flow with curl rather than by reading the code.
+
+The middleware is also *not* the security boundary, and says so: it checks only
+that a session cookie is **present**, without verifying its signature. It runs
+on the edge runtime, where the database is unreachable — treating it as the
+boundary would put the real checks somewhere that cannot perform them. Every
+page and route re-resolves the principal server-side.
+
+## 56. Password logic lives outside the Auth.js wiring
+
+`config.ts` imports `next-auth`, which pulls in Next's server runtime and cannot
+be loaded under vitest. Hashing, normalisation and verification therefore live
+in `credentials.ts`, which is the part worth testing.
+
+Three properties covered by tests: the stored hash is bcrypt at **cost 12**
+(asserted against the `$2b$12$` prefix of a real row); the email is trimmed and
+lowercased, so casing cannot lock a user out; and an unknown address still runs
+a full bcrypt comparison against a decoy hash.
+
+That last one matters: without it, "no such user" returns in microseconds while
+a real user costs a full cost-12 verification — a reliable oracle for
+enumerating which addresses have accounts. The decoy is generated at module load
+at `BCRYPT_COST` rather than hard-coded, so it cannot drift from the real cost.
+The login form shows one message for every failure, for the same reason.
+
+## 57. Session tokens are shape-validated on the way out
+
+The JWT is signed by us, so this is not about forgery — it is about **staleness**.
+A token issued before a schema change (a role renamed, a claim added) is
+cryptographically valid and semantically wrong, and reading a missing claim as
+`undefined` would hand `role: undefined` to the access checks. The session
+callback parses the claims with Zod and blanks the identity if they do not fit,
+which logs the holder out rather than admitting them with an undefined role.
+
+## 58. `/ops` is agency_admin only — including against agency_member
+
+The M4 placeholder gate (closed in production, open in development) is replaced
+by the real role check. `/ops` shows ingest errors, per-property freshness and
+spend across the whole organisation, so it is the one page an `agency_member`
+should not see either. Verified end to end: the seeded client account gets
+"restricted to agency administrators"; the admin account gets the dashboard.

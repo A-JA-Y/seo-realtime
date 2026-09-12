@@ -1,41 +1,34 @@
-import { requireEnv } from '@/lib/env';
+import { assertRole, type Principal } from './access';
+import { currentPrincipal } from './config';
 
 /**
- * Access gate for `/ops`, pending real auth in M5.
+ * Access gate for `/ops` (§10: agency_admin only).
  *
- * §10 makes `/ops` agency_admin only, and it exposes ingest health, error
- * messages and spend. Auth.js lands in M5, so this is the seam that will hold
- * `assertPropertyAccess`-style checks when it does.
- *
- * Until then it FAILS CLOSED in production. Shipping an open /ops and promising
- * to lock it down next milestone is how an internal dashboard ends up indexed;
- * a page that refuses to render is an obvious gap, which is the failure mode to
- * prefer.
+ * `/ops` shows ingest errors, per-property freshness and month-to-date spend
+ * across the whole organisation, so it is the one page an agency_member should
+ * not see either.
  */
-export class OpsAccessError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'OpsAccessError';
-  }
-}
-
 export interface OpsAccess {
   allowed: boolean;
   reason: string;
+  principal: Principal | null;
 }
 
-export function checkOpsAccess(): OpsAccess {
-  const { NODE_ENV } = requireEnv('NODE_ENV');
+export async function checkOpsAccess(): Promise<OpsAccess> {
+  const principal = await currentPrincipal();
 
-  if (NODE_ENV === 'production') {
-    return {
-      allowed: false,
-      reason:
-        'Authentication is not wired up yet (Auth.js lands in M5). /ops exposes ingest ' +
-        'errors and spend, so it stays closed in production until a real agency_admin ' +
-        'session check replaces this.',
-    };
+  if (!principal) {
+    return { allowed: false, reason: 'Sign in to view operations.', principal: null };
   }
 
-  return { allowed: true, reason: 'development' };
+  try {
+    assertRole(principal, 'agency_admin');
+    return { allowed: true, reason: 'agency_admin', principal };
+  } catch {
+    return {
+      allowed: false,
+      reason: 'Operations is restricted to agency administrators.',
+      principal,
+    };
+  }
 }

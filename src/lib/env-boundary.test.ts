@@ -97,6 +97,34 @@ describe('anti-pattern guards', () => {
     expect(format(offenders), 'Use `unknown` and narrow it, or write the real type').toEqual([]);
   });
 
+  it('routes never reach past the scoped query layer', () => {
+    /*
+     * §10: "Route every query through a `forProperty(propertyId)` builder so
+     * writing an unscoped query is structurally difficult rather than merely
+     * discouraged."
+     *
+     * A route that imports the raw `db` handle can query any tenant's rows with
+     * no access check, and nothing in the type system objects. This is that
+     * rule as a test.
+     *
+     * Exempt: the machine-authenticated endpoints. `api/cron` and
+     * `api/webhooks` are called by schedulers and DataForSEO with their own
+     * shared secrets and no session at all — they legitimately operate across
+     * every tenant. `api/health` reads only schema metadata, and `api/auth` is
+     * Auth.js's own handler.
+     */
+    const EXEMPT = /^src\/app\/api\/(cron|webhooks|health|auth)\//;
+
+    const offenders = excludingSelf(
+      excludingTests(excludingComments(gitGrep("from '@/server/db'", ['src/app']))),
+    ).filter((m) => !EXEMPT.test(m.file));
+
+    expect(
+      format(offenders),
+      'Use forProperty(principal, propertyId) or accessibleProperties(principal) instead of the raw db handle',
+    ).toEqual([]);
+  });
+
   it('never writes a literal 100 as a rank fallback', () => {
     // Domain rule 5 / acceptance criterion 4: "not found" is not position 100.
     // This catches the specific shape of that mistake, e.g. `rankGroup ?? 100`.

@@ -81,6 +81,9 @@ const envSchema = z.object({
   // ── Seed (optional) ────────────────────────────────────────────────────────
   SEED_ADMIN_EMAIL: z.string().email().optional(),
   SEED_ADMIN_PASSWORD: z.string().min(8).optional(),
+  /** Optional: seeds a `client` account scoped to the seeded property only. */
+  SEED_CLIENT_EMAIL: z.string().email().optional(),
+  SEED_CLIENT_PASSWORD: z.string().min(8).optional(),
 });
 
 export type Env = z.infer<typeof envSchema>;

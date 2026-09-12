@@ -34,7 +34,7 @@ const STATUS_STYLE: Record<IngestRunRow['status'], string> = {
 };
 
 export default async function OpsPage() {
-  const access = checkOpsAccess();
+  const access = await checkOpsAccess();
 
   if (!access.allowed) {
     return (

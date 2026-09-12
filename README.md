@@ -40,7 +40,7 @@ UI is labelled with its source.
 | **M2 — Search Console ingestion** | **Complete against fixtures.** JWT auth, hourly job with the documented dimension fallback, `fresh` + `final` writers, resumable 16-month backfill, the single read-precedence function, retry policy, structured logging, `ingest_runs`. **Not yet verified against the live property** — see below |
 | **M3 — DataForSEO ingestion** | **Complete against fixtures.** Batched `task_post`, secret-guarded pingback webhook, the parser, trimmed payload storage, live "check now" with its cooldown. **No live SERP has been fetched** — see below |
 | **M4 — Cron + ops** | **Complete.** Authenticated cron dispatcher, retention with rollup-first safety guards, daily rank rollups, `/ops` page, GitHub Actions hourly schedule. `/ops` fails closed in production until M5 brings auth |
-| M5 — Auth + tenancy | Not started |
+| **M5 — Auth + tenancy** | **Complete.** Auth.js credentials, three roles, `assertPropertyAccess`, the `forProperty` scoped builder, cross-tenant tests at the API layer, `/ops` gated to agency_admin |
 | M6 — Dashboard | Not started |
 | M7 — Alerts | Not started |
 | M8 — Hardening | Not started |
@@ -121,9 +121,11 @@ src/
     concurrency.ts    Bounded parallelism; failures captured, not thrown
     gsc-dates.ts      Pacific Time arithmetic — domain rule 4 lives here
     utils.ts          cn() for shadcn
+  middleware.ts       Coarse page gate only — NOT the security boundary
   server/
     db/
       schema.ts       Full schema: tenancy, tracking, GSC, SERP, rollups, alerts, ops
+      scoped.ts       forProperty(): a scope you cannot construct without access
       index.ts        Drizzle handle (Neon HTTP in prod, node-postgres elsewhere)
       seed.ts         Idempotent seed
       seed-data.ts    Property, keywords and location codes — verify before paid runs
@@ -133,7 +135,12 @@ src/
       retention.ts    Prune, with guards that refuse to delete unrolled days
       queries.ts      /ops data: run health, freshness, month-to-date spend
     auth/
-      ops-access.ts   Fails closed in production until M5 wires Auth.js
+      access.ts       THE tenancy rule: assertPropertyAccess, forProperty's gate
+      credentials.ts  bcrypt cost 12, email normalisation, timing-safe lookup
+      config.ts       Auth.js wiring and currentPrincipal()
+      ops-access.ts   /ops is agency_admin only
+    api/
+      respond.ts      One typed error shape. 403 never 404, for tenancy
     ingest/
       dataforseo-client.ts  HTTP Basic, batched task_post, Zod-validated responses
       serp-parse.ts   THE SERP parser: rank_group vs rank_absolute, competitors, features
@@ -148,7 +155,11 @@ src/
     api/health/       Liveness + schema check
     api/webhooks/dataforseo/  Pingback. 401 unauthenticated, 200 for everything else
     api/cron/[job]/   Authenticated dispatcher. Bearer header or ?secret=
-    ops/              Ingest health and spend
+    api/auth/         Auth.js handlers
+    api/properties/   Properties this session may read
+    api/keywords/[id]/  Keyword detail, tenancy-checked
+    login/            Sign-in (server action; the password never reaches a bundle)
+    ops/              Ingest health and spend — agency_admin only
   test/
     setup.ts          Offline-by-default test bootstrap
     fixtures/         READ fixtures/README.md — the GSC ones are synthetic
