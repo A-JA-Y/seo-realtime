@@ -10,7 +10,16 @@
  * It also answers the one thing Google does not document — whether `date` and
  * `hour` may be grouped in a single request — because the hourly ingest needs
  * that answer and guessing wrong costs an hour of silent no-ops.
+ *
+ *   pnpm verify:gsc                   check credentials and probe
+ *   pnpm verify:gsc --save-fixtures   ALSO write the real responses to
+ *                                     src/test/fixtures/gsc/, replacing the
+ *                                     hand-written ones the parser tests
+ *                                     currently run against
  */
+import { mkdir, writeFile } from 'node:fs/promises';
+import path from 'node:path';
+
 import { JWT } from 'google-auth-library';
 
 import { requireEnv } from '@/lib/env';
@@ -76,6 +85,25 @@ function explain(message: string): string[] {
 
 function printExplanation(message: string) {
   for (const line of explain(message)) console.log(`    → ${line}`);
+}
+
+const SAVE_FIXTURES = process.argv.slice(2).includes('--save-fixtures');
+const FIXTURE_DIR = path.join(process.cwd(), 'src/test/fixtures/gsc');
+
+/**
+ * Persist a genuine response.
+ *
+ * The committed Search Console fixtures are hand-written from Google's
+ * reference, because no credentials existed when the parser was built. Any test
+ * asserting on response SHAPE is therefore testing an assumption until this has
+ * run — the `hour` key format in particular.
+ */
+async function saveFixture(name: string, body: unknown) {
+  if (!SAVE_FIXTURES) return;
+  await mkdir(FIXTURE_DIR, { recursive: true });
+  const file = path.join(FIXTURE_DIR, `${name}.json`);
+  await writeFile(file, JSON.stringify(body, null, 2));
+  console.log(`    saved → ${path.relative(process.cwd(), file)}`);
 }
 
 async function main() {
@@ -178,6 +206,20 @@ async function main() {
 
     const rows = response.data.rows ?? [];
     pass(`HTTP 200, ${rows.length} row(s)`);
+    await saveFixture('real-hourly-per-date', response.data);
+
+    // The undocumented bit the parser has to survive: is the `hour` key a bare
+    // 0-23 string, or a full ISO timestamp at the Pacific offset?
+    const sampleHourKey = rows[0]?.keys?.[0];
+    if (sampleHourKey !== undefined) {
+      console.log('');
+      console.log(`    hour key format: ${JSON.stringify(sampleHourKey)}`);
+      console.log(
+        /^\d{1,2}$/.test(sampleHourKey)
+          ? '    → bare hour. parseHourKey handles this.'
+          : '    → ISO timestamp; it carries its own date. parseHourKey handles this too.',
+      );
+    }
 
     if (rows.length === 0) {
       console.log('    An empty rows array is still a PASS — it means no impressions yet today.');
@@ -216,6 +258,7 @@ async function main() {
     });
     pass(`Combined shape ACCEPTED — ${response.data.rows?.length ?? 0} row(s) across 2 days`);
     console.log('    One request per keyword covers the whole window.');
+    await saveFixture('real-hourly-combined', response.data);
   } catch (error) {
     const message = redactError(error);
     if (/\b400\b/.test(message)) {
@@ -235,6 +278,11 @@ async function main() {
   heading('Result');
   if (failures === 0) {
     pass('Search Console is correctly provisioned.');
+    if (!SAVE_FIXTURES) {
+      console.log('\n  The committed GSC fixtures are hand-written, not captured.');
+      console.log('  Run `pnpm verify:gsc --save-fixtures` to replace them with real');
+      console.log('  responses, then commit them — see src/test/fixtures/README.md.');
+    }
     console.log('\n  Next: requirements.md §5 — DataForSEO, then `pnpm verify:dataforseo`.\n');
   } else {
     fail(`${failures} check(s) failed. Fix these before building — see the hints above.\n`);

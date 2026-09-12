@@ -1,0 +1,3 @@
+{
+  "_provenance": "SYNTHETIC — a 200 with no rows at all. Google omits `rows` entirely rather than sending []. This is a PASS, not a failure: it means no impressions in the window."
+}

@@ -114,3 +114,139 @@ slice they need.
 For the application itself nothing changes in practice: the first access
 happens while a server module initialises, so a bad environment still fails
 immediately and loudly.
+
+---
+
+# M2 — Search Console ingestion
+
+## 9. `data_state = 'fresh'` has a writer, which §5 never specified
+
+The `gsc_data_state` enum is `('hourly','fresh','final')` and §5's read
+resolution is explicitly "final where it exists, else fresh, else the
+impression-weighted aggregate of that date's hourly rows". But §5 names only
+two writers: the hourly job (`hourly_all` → `'hourly'`) and reconciliation
+(`final` → `'final'`). Nothing produces `'fresh'`.
+
+**Change.** The hourly job also issues one request per keyword with
+`dimensions: ["date","query"]` and `dataState: "all"` over T−3…T−0, written as
+`data_state = 'fresh'`, `gsc_hour = NULL`.
+
+**Why, rather than leaving the enum value unwritten.** Reconciliation settles
+exactly T−4. Without a `fresh` writer, the daily figure for T−3, T−2, T−1 and
+T−0 is *our* impression-weighted aggregate of whatever hour buckets Google
+happened to return — which understates total impressions and biases the
+position toward the keyword's busiest hours. Worse, that understatement is
+self-concealing: domain rule 6's low-confidence check keys off the same
+impression count, so the number that is wrong is also the number that decides
+whether to trust it. `dataState: "all"` is a daily figure Google computed over
+the whole day.
+
+The cost is one extra request per keyword per hour. Search Console requests are
+free and the quota is 1,200/minute per site.
+
+## 10. CHECK constraints on `gsc_snapshots`
+
+Five constraints, added in `drizzle/0001_gsc_ingest.sql`:
+
+| Constraint | Enforces |
+|---|---|
+| `no_position_without_impressions` | `impressions > 0 OR position IS NULL` |
+| `position_range` | `position IS NULL OR position >= 1` |
+| `counts_nonnegative` | `clicks >= 0 AND impressions >= 0` |
+| `hour_range` | `gsc_hour IS NULL OR gsc_hour BETWEEN 0 AND 23` |
+| `hour_matches_state` | `(data_state = 'hourly') = (gsc_hour IS NOT NULL)` |
+
+These are the invariants the read resolver would otherwise have to detect and
+report at runtime. Enforcing them in the database makes the violating rows
+*unstorable*, which converts a class of silent wrong answers into a loud write
+failure at the point the bad data was produced.
+
+`position >= 1` is the one that earns its keep: position 0 does not exist, and a
+0 stored here renders *above* position 1 on the inverted rank axis §11 requires
+— better than first place. The mapper drops a sub-1 position to NULL and logs
+it rather than letting the write fail.
+
+All five are verified against a live Postgres 16, rejecting the bad rows and
+accepting the legitimate ones.
+
+## 11. Backfill progress is a new table, keyed per keyword
+
+`gsc_backfill_cursors (keyword_id PK, property_id, covered_from, covered_through,
+completed_at, updated_at)`.
+
+Two designs were rejected:
+
+**Derive progress from `gsc_snapshots`** (`MIN(gsc_date)` per keyword) needs no
+new state, and is wrong. That table records only *positive* observations —
+Google omits dates with no impressions entirely — so a window in which a keyword
+had no traffic writes no rows, `MIN(gsc_date)` does not advance, and the walk
+either loops or redoes the same window forever.
+
+**A single `properties.gsc_backfill_cursor`** is simpler, and leaves a keyword
+added *after* the property finished backfilling permanently blank: the property
+is already marked done. §10 exposes `POST /api/properties/:id/keywords`, so
+that is a routine operation, not an edge case. There is a test for it.
+
+`properties.backfilled_at` still exists and still means what §5 says — it is set
+once every one of the property's keywords has reached the retention floor, and
+a re-run does not move it.
+
+## 12. `properties.gsc_dimension_mode` and `gsc_dimension_probed_at`
+
+§5 requires probing whether `date` and `hour` may be grouped in one request, and
+caching the answer: "do not retry the failing shape every hour."
+
+The cache has to be durable. Every cron invocation is a cold serverless process,
+so a module-level memo caches nothing across invocations — it would re-probe
+every hour, which is precisely what the spec forbids.
+
+Scoped per property rather than globally. The capability is probably uniform
+across the API, but assuming so and being wrong means one property silently
+stops ingesting; assuming per-property and being wrong costs one redundant
+probe per property, once.
+
+A `per_date` answer is re-probed after 30 days, so a downgrade is not permanent
+if Google starts accepting the combined shape. Only an HTTP **400** triggers the
+fallback — a 5xx is transient and must not downgrade the property, which is
+tested.
+
+## 13. `gsc_hour` is a clock LABEL, not an elapsed hour
+
+Verified against `date-fns-tz`, not reasoned about:
+
+| Pacific date | Elapsed hours | Distinct `gsc_hour` labels |
+|---|---|---|
+| 2026-03-08 (spring forward) | 23 | 23 — 02:00 never happens |
+| 2026-06-15 (ordinary) | 24 | 24 |
+| 2026-11-01 (fall back) | **25** | **24** — 01:00 happens twice |
+
+The fall-back day is the trap. It is 25 hours long, but `gsc_hour` is a
+`SMALLINT` 0–23, so two real hours share label 1. Two consequences:
+
+1. `pacificHourLabelsInDay` returns 24 for that day, not 25. Returning 25 would
+   make every fall-back day render as permanently incomplete.
+2. Two API rows can collapse onto one natural key. Postgres refuses
+   `ON CONFLICT DO UPDATE` when a single statement touches the same row twice
+   ("cannot affect row a second time"), so leaving them in a batch does not
+   merely lose precision — it throws and loses the whole batch. `mergeDuplicates`
+   sums clicks and impressions and impression-weights the positions, which is
+   the honest reading: the label covered both hours.
+
+Whether Google actually returns two buckets that day is unknown, and depends on
+the `hour` key format — an ISO timestamp carries distinct offsets (`-07:00` and
+`-08:00`) and would disambiguate; a bare `"1"` would not. `pnpm verify:gsc
+--save-fixtures` captures the real format.
+
+## 14. Search Console fixtures are hand-written, not captured
+
+`src/test/fixtures/gsc/*.json` were written from Google's Search Analytics
+reference because no credentials exist in the build environment. They are
+labelled as synthetic in `src/test/fixtures/README.md`, and
+`pnpm verify:gsc --save-fixtures` replaces them with real captures.
+
+The specific open question is the `hour` dimension key format: Google's
+reference does not state whether it is a bare `"13"` or a full
+`"2026-09-12T13:00:00-07:00"`. `parseHourKey` handles both and takes the hour
+*literally* out of the string rather than parsing it into a `Date` — a `Date`
+round trip converts through the runtime's local zone and silently shifts the
+hour, which is the class of bug domain rule 4 forbids.

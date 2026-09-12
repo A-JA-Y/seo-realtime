@@ -1,0 +1,9 @@
+{
+  "_provenance": "SYNTHETIC — same as hourly-combined-iso.json but with the hour key as a bare 0-23 string. Google's reference does not state which shape is returned; the parser must survive both.",
+  "rows": [
+    { "keys": ["0", "prestige sector 150 noida"], "clicks": 0, "impressions": 2, "ctr": 0, "position": 22 },
+    { "keys": ["13", "prestige sector 150 noida"], "clicks": 1, "impressions": 12, "ctr": 0.0833333333, "position": 9.5 },
+    { "keys": ["23", "prestige sector 150 noida"], "clicks": 0, "impressions": 0, "ctr": 0 }
+  ],
+  "responseAggregationType": "byProperty"
+}

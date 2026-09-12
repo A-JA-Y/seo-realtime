@@ -8,6 +8,13 @@
       "when": 1789219378466,
       "tag": "0000_init",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1789223582569,
+      "tag": "0001_gsc_ingest",
+      "breakpoints": true
     }
   ]
 }

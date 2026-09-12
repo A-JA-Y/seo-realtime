@@ -1,0 +1,11 @@
+{
+  "_provenance": "SYNTHETIC — dimensions ['date','query'], dataState 'final'. Mirrors the known series for this keyword: ~35.0 on 31 Aug improving to ~7.8 by 9 Sep.",
+  "rows": [
+    { "keys": ["2026-08-31", "prestige sector 150 noida"], "clicks": 0, "impressions": 11, "ctr": 0, "position": 35.09 },
+    { "keys": ["2026-09-01", "prestige sector 150 noida"], "clicks": 0, "impressions": 14, "ctr": 0, "position": 31.5 },
+    { "keys": ["2026-09-05", "prestige sector 150 noida"], "clicks": 1, "impressions": 46, "ctr": 0.0217391304, "position": 15.2 },
+    { "keys": ["2026-09-08", "prestige sector 150 noida"], "clicks": 3, "impressions": 88, "ctr": 0.0340909091, "position": 13.4 },
+    { "keys": ["2026-09-09", "prestige sector 150 noida"], "clicks": 5, "impressions": 122, "ctr": 0.0409836066, "position": 7.8 }
+  ],
+  "responseAggregationType": "byProperty"
+}

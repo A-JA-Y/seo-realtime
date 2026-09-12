@@ -1,0 +1,8 @@
+{
+  "_provenance": "SYNTHETIC — the awkward rows. Google omits metric fields rather than sending zero, omits `position` entirely when there were no impressions, and returns low-impression rows that look precise but are noise (domain rule 6).",
+  "rows": [
+    { "keys": ["2026-09-10", "prestige sector 150 noida"], "impressions": 0, "clicks": 0, "ctr": 0 },
+    { "keys": ["2026-09-11", "prestige sector 150 noida"], "impressions": 1, "position": 6 },
+    { "keys": ["2026-09-12", "prestige sector 150 noida"] }
+  ]
+}

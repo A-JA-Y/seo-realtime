@@ -37,7 +37,7 @@ UI is labelled with its source.
 | Milestone | State |
 |---|---|
 | **M1 — Foundation** | **Complete.** Next.js 15 + strict TS + Tailwind v4, Zod env validation, full Drizzle schema + migration, idempotent seed, health route, setup verification scripts |
-| M2 — Search Console ingestion | Not started |
+| **M2 — Search Console ingestion** | **Complete against fixtures.** JWT auth, hourly job with the documented dimension fallback, `fresh` + `final` writers, resumable 16-month backfill, the single read-precedence function, retry policy, structured logging, `ingest_runs`. **Not yet verified against the live property** — see below |
 | M3 — DataForSEO ingestion | Not started |
 | M4 — Cron + ops | Not started |
 | M5 — Auth + tenancy | Not started |
@@ -47,6 +47,24 @@ UI is labelled with its source.
 
 Pacific-time date handling (`src/lib/gsc-dates.ts`) landed early — the setup
 checker needs it, and it encodes domain rule 4.
+
+### What "against fixtures" means
+
+No Search Console credentials existed in the build environment, so M2's
+verification target — *"reproduce the known series for `prestige sector 150
+noida`, roughly 35.0 on 31 Aug improving to 7.8 by 9 Sep"* — has **not** been
+run. The GSC fixtures are hand-written from Google's API reference and labelled
+as such in `src/test/fixtures/README.md`.
+
+Two things are genuinely unknown until you run `pnpm verify:gsc`:
+
+1. Whether `["date","hour","query"]` is accepted in one request. Both paths are
+   implemented and the fallback is tested; the probe decides at runtime.
+2. The `hour` dimension key format — bare `"13"` or a full ISO timestamp.
+   `parseHourKey` handles both, and both are covered by tests.
+
+`pnpm verify:gsc --save-fixtures` answers both and rewrites the fixtures with
+real captures. Everything else in M2 is verified against a real Postgres.
 
 ---
 
@@ -91,6 +109,9 @@ src/
   lib/
     env.ts            The ONLY reader of process.env. Zod-validated, cached
     redact.ts         Secret scrubbing for anything reaching a log or response
+    logger.ts         Structured JSON logs, key-aware redaction
+    retry.ts          3 attempts, full jitter, 429/5xx only — never a 400
+    concurrency.ts    Bounded parallelism; failures captured, not thrown
     gsc-dates.ts      Pacific Time arithmetic — domain rule 4 lives here
     utils.ts          cn() for shadcn
   server/
@@ -99,10 +120,18 @@ src/
       index.ts        Drizzle handle (Neon HTTP in prod, node-postgres elsewhere)
       seed.ts         Idempotent seed
       seed-data.ts    Property, keywords and location codes — verify before paid runs
+    ingest/
+      gsc-client.ts   JWT auth, Zod-validated responses, dimension key parsing
+      gsc-series.ts   THE read-precedence resolver. Pure — no database import
+      gsc-read.ts     One indexed range scan, then the resolver
+      gsc-upsert.ts   API row → DB row, duplicate merging, idempotent write
+      gsc.ts          The three jobs: hourly, reconcile, backfill
+      runs.ts         ingest_runs lifecycle
   app/
     api/health/       Liveness + schema check
   test/
     setup.ts          Offline-by-default test bootstrap
+    fixtures/         READ fixtures/README.md — the GSC ones are synthetic
 scripts/
   verify-gsc.ts       requirements.md §4
   verify-dataforseo.ts  requirements.md §§6–7

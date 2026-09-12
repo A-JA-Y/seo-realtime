@@ -3,6 +3,7 @@ import {
   bigint,
   bigserial,
   boolean,
+  check,
   date,
   index,
   integer,
@@ -34,6 +35,22 @@ const createdAt = () =>
 export const userRole = pgEnum('user_role', ['agency_admin', 'agency_member', 'client']);
 export const gscPropertyType = pgEnum('gsc_property_type', ['url_prefix', 'domain']);
 export const deviceType = pgEnum('device_type', ['desktop', 'mobile']);
+
+/**
+ * Which request shape this property's Search Console data accepts.
+ *
+ * Google's reference confirms `date` and `hour` are both valid dimensions but
+ * does NOT document whether they may be combined in one request. §5 requires
+ * probing it once and caching the answer — "do not retry the failing shape
+ * every hour". Every cron invocation is a cold serverless process, so an
+ * in-memory memo would cache nothing; the answer has to be durable.
+ *
+ * Scoped per property rather than globally: the capability is probably uniform
+ * across the API, but assuming so and being wrong means one property silently
+ * stops ingesting, while assuming per-property and being wrong costs one
+ * redundant probe per property, once.
+ */
+export const gscDimensionMode = pgEnum('gsc_dimension_mode', ['unknown', 'combined', 'per_date']);
 
 /**
  * Provisional → finalised lifecycle of a Search Console figure.
@@ -110,7 +127,16 @@ export const properties = pgTable(
     /** Presentation timezone. Ingestion never converts; see domain rule 4. */
     timezone: text('timezone').notNull().default('Asia/Kolkata'),
     isActive: boolean('is_active').notNull().default(true),
+    /** Set once every keyword's backfill has reached the 16-month floor. */
     backfilledAt: timestamp('backfilled_at', { withTimezone: true, mode: 'date' }),
+    /** Cached answer to the date+hour dimension probe. See gscDimensionMode. */
+    gscDimensionMode: gscDimensionMode('gsc_dimension_mode').notNull().default('unknown'),
+    /**
+     * When the probe last ran. A `per_date` answer is re-probed occasionally so
+     * a downgrade is not permanent if Google starts accepting the combined
+     * shape — but not every hour, which is what §5 forbids.
+     */
+    gscDimensionProbedAt: timestamp('gsc_dimension_probed_at', { withTimezone: true, mode: 'date' }),
     createdAt: createdAt(),
   },
   (t) => [unique('properties_org_site_url_key').on(t.orgId, t.gscSiteUrl)],
@@ -228,7 +254,71 @@ export const gscSnapshots = pgTable(
       .on(t.keywordId, t.gscDate, t.gscHour, t.dataState)
       .nullsNotDistinct(),
     index('gsc_snapshots_lookup').on(t.keywordId, t.gscDate.desc(), t.dataState),
+
+    /*
+     * The storage invariants, enforced by the database rather than by comments.
+     *
+     * These are the rules the read resolver would otherwise have to detect and
+     * report at runtime. Enforcing them here makes the violating rows
+     * unstorable, which turns a class of silent wrong answers into a loud write
+     * failure at the point the bad data was produced.
+     */
+
+    // Domain rule 5's principle, applied to Search Console: no impressions
+    // means no position. Never a zero, never a sentinel.
+    check('gsc_snapshots_no_position_without_impressions', sql`impressions > 0 OR position IS NULL`),
+
+    // Position 0 does not exist. A 0 here would render above position 1 on an
+    // inverted axis — better than first place.
+    check('gsc_snapshots_position_range', sql`position IS NULL OR position >= 1`),
+
+    check('gsc_snapshots_counts_nonnegative', sql`clicks >= 0 AND impressions >= 0`),
+
+    // `gsc_hour` is a Pacific clock LABEL, not an elapsed hour. The 25-hour
+    // fall-back day still only has labels 0-23.
+    check('gsc_snapshots_hour_range', sql`gsc_hour IS NULL OR (gsc_hour >= 0 AND gsc_hour <= 23)`),
+
+    // An hourly row has an hour; a daily row does not. This biconditional is
+    // what makes the read resolver total — with it, "which rows are the daily
+    // candidate" has exactly one answer.
+    check(
+      'gsc_snapshots_hour_matches_state',
+      sql`(data_state = 'hourly') = (gsc_hour IS NOT NULL)`,
+    ),
   ],
+);
+
+/**
+ * Per-keyword backfill progress.
+ *
+ * Search Console holds 16 months, walked backwards in 3-month windows. The job
+ * must be resumable, and progress cannot be derived from `gsc_snapshots`: that
+ * table is a log of POSITIVE observations, and Google omits dates with no
+ * impressions entirely. A quiet window writes no rows, so `MIN(gsc_date)` would
+ * not advance and the walk would either loop or redo work forever.
+ *
+ * Keyed per keyword rather than per property for a second reason: a keyword
+ * added to an already-backfilled property still needs its own history. A
+ * property-level "done" flag would leave it permanently blank.
+ */
+export const gscBackfillCursors = pgTable(
+  'gsc_backfill_cursors',
+  {
+    keywordId: uuid('keyword_id')
+      .primaryKey()
+      .references(() => keywords.id, { onDelete: 'cascade' }),
+    propertyId: uuid('property_id')
+      .notNull()
+      .references(() => properties.id, { onDelete: 'cascade' }),
+    /** Earliest date attempted so far. The walk continues backwards from here. */
+    coveredFrom: date('covered_from', { mode: 'string' }),
+    /** Latest date attempted. Where the first window started. */
+    coveredThrough: date('covered_through', { mode: 'string' }),
+    /** Set when the walk reaches the 16-month retention floor. */
+    completedAt: timestamp('completed_at', { withTimezone: true, mode: 'date' }),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).notNull().defaultNow(),
+  },
+  (t) => [index('gsc_backfill_cursors_property').on(t.propertyId, t.completedAt)],
 );
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -436,6 +526,17 @@ export const keywordTargetsRelations = relations(keywordTargets, ({ one, many })
   rollups: many(dailyRankRollups),
 }));
 
+export const gscBackfillCursorsRelations = relations(gscBackfillCursors, ({ one }) => ({
+  keyword: one(keywords, {
+    fields: [gscBackfillCursors.keywordId],
+    references: [keywords.id],
+  }),
+  property: one(properties, {
+    fields: [gscBackfillCursors.propertyId],
+    references: [properties.id],
+  }),
+}));
+
 export const gscSnapshotsRelations = relations(gscSnapshots, ({ one }) => ({
   keyword: one(keywords, {
     fields: [gscSnapshots.keywordId],
@@ -495,6 +596,7 @@ export type Property = typeof properties.$inferSelect;
 export type Keyword = typeof keywords.$inferSelect;
 export type KeywordTarget = typeof keywordTargets.$inferSelect;
 export type GscSnapshot = typeof gscSnapshots.$inferSelect;
+export type GscBackfillCursor = typeof gscBackfillCursors.$inferSelect;
 export type SerpCheck = typeof serpChecks.$inferSelect;
 export type DailyRankRollup = typeof dailyRankRollups.$inferSelect;
 export type Alert = typeof alerts.$inferSelect;
@@ -508,6 +610,7 @@ export type NewIngestRun = typeof ingestRuns.$inferInsert;
 export type UserRole = (typeof userRole.enumValues)[number];
 export type DeviceType = (typeof deviceType.enumValues)[number];
 export type GscDataState = (typeof gscDataState.enumValues)[number];
+export type GscDimensionMode = (typeof gscDimensionMode.enumValues)[number];
 export type AlertType = (typeof alertType.enumValues)[number];
 export type AlertSeverity = (typeof alertSeverity.enumValues)[number];
 export type IngestKind = (typeof ingestKind.enumValues)[number];

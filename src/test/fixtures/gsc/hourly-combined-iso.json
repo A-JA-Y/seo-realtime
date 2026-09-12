@@ -1,0 +1,10 @@
+{
+  "_provenance": "SYNTHETIC — hand-written from Google's Search Analytics reference. Shape: dimensions ['date','hour','query'], dataState 'hourly_all', hour key as an ISO timestamp at the Pacific offset.",
+  "rows": [
+    { "keys": ["2026-09-11", "2026-09-11T09:00:00-07:00", "prestige sector 150 noida"], "clicks": 0, "impressions": 4, "ctr": 0, "position": 18.25 },
+    { "keys": ["2026-09-11", "2026-09-11T13:00:00-07:00", "prestige sector 150 noida"], "clicks": 1, "impressions": 12, "ctr": 0.0833333333, "position": 9.5 },
+    { "keys": ["2026-09-11", "2026-09-11T21:00:00-07:00", "prestige sector 150 noida"], "clicks": 0, "impressions": 1, "ctr": 0, "position": 6 },
+    { "keys": ["2026-09-12", "2026-09-12T08:00:00-07:00", "prestige sector 150 noida"], "clicks": 2, "impressions": 31, "ctr": 0.0645161290, "position": 7.8 }
+  ],
+  "responseAggregationType": "byProperty"
+}
