@@ -42,7 +42,7 @@ UI is labelled with its source.
 | **M4 — Cron + ops**               | **Complete.** Authenticated cron dispatcher, retention with rollup-first safety guards, daily rank rollups, `/ops` page, GitHub Actions hourly schedule. `/ops` fails closed in production until M5 brings auth                                                                                      |
 | **M5 — Auth + tenancy**           | **Complete.** Auth.js credentials, three roles, `assertPropertyAccess`, the `forProperty` scoped builder, cross-tenant tests at the API layer, `/ops` gated to agency_admin                                                                                                                          |
 | **M6 — Dashboard**                | **Complete.** Property picker, overview tiles, keyword table, keyword detail with the dual-series chart and the reconciliation panel, competitors, SERP composition strip, ranking-URL history, "check now", dark mode. Verified against 28 days of synthetic data and eyeballed at 1400px and 400px |
-| M7 — Alerts                       | **Read side only.** The feed page and the unread badge render from the `alerts` table; nothing writes to it yet. The engine is not built                                                                                                                                                             |
+| **M7 — Alerts**                   | **Complete.** Eight alert types, pure rules, signature-based suppression, automatic and manual resolution, and the in-app feed with mark-read / resolve / mark-all. Its own cron job, chained after the rollup                                                                                       |
 | M8 — Hardening                    | Not started                                                                                                                                                                                                                                                                                          |
 
 Pacific-time date handling (`src/lib/gsc-dates.ts`) landed early — the setup
@@ -93,13 +93,33 @@ not have to reconstruct it from the diff.
    why every `rank_absolute` value also appears as text in the tooltip and the
    table — that pairing is the mitigation, not an accident.
 
-**What M7 needs.** The `alerts` table, its partial unique index on
-`signature WHERE resolved_at IS NULL`, and the read side all exist. Missing: the
-engine that evaluates conditions against `daily_rank_rollups` baselines (never a
-single check — §9), computes the signature so re-firing is a no-op insert,
-resolves an alert when the condition clears, and the mark-read / resolve
-actions behind the feed. `unreadAlertCount` and `listAlerts` in
-`queries.ts` are what the UI already calls.
+**What M7 built.**
+
+- `src/server/alerts/rules.ts` — pure. Takes a day's facts, returns candidates;
+  no database, no clock. Thresholds, severities and signatures are all testable
+  without standing anything up.
+- `src/server/alerts/engine.ts` — the gather step. One query for both days plus
+  two event signals, then the rules, then the write.
+- `PATCH /api/alerts/:id` and `POST /api/properties/:id/alerts` — read, unread,
+  resolve, mark-all. Every mutation goes through the scope, so the property
+  predicate is applied by the thing that performed the tenancy check.
+
+_The signature is the whole design._ It is `sha256(type + target + bucket)`,
+and the bucket is never a date: for a STATE (out of the top ten, gone from the
+results) it is empty, because there is one way to be in that state; for a MOVE
+it is the position moved from, so 5 → 15 and a later 15 → 40 are two alerts
+while re-detecting the same 5 → 15 hourly is one; for an EVENT it is what
+happened. The partial unique index on `signature WHERE resolved_at IS NULL`
+then makes a repeat a no-op insert — which also means resolving is load-bearing
+rather than cosmetic: an open alert holds its signature and suppresses a
+recurrence, so an engine that only ever opened alerts would fire each condition
+exactly once, for ever.
+
+_A rollup built from one check IS that check._ Reading a rollup does not by
+itself satisfy §9's "never a single check", so a day resting on fewer than
+`MIN_CHECKS_PER_DAY` checks is not judged at all — neither raised on nor
+resolved on, because a day you cannot judge is not evidence a condition
+cleared.
 
 **What M8 needs.** Playwright end-to-end coverage (`pnpm test:e2e` is wired but
 there are no specs), API rate limits beyond the check-now cooldown, empty and
@@ -196,6 +216,9 @@ src/
       index.ts        Drizzle handle (Neon HTTP in prod, node-postgres elsewhere)
       seed.ts         Idempotent seed
       seed-data.ts    Property, keywords and location codes — verify before paid runs
+    alerts/
+      rules.ts        Pure: a day's facts in, alert candidates out. No DB, no clock
+      engine.ts       Gathers the facts, writes what fires, resolves what cleared
     ops/
       cron-jobs.ts    The job registry: what each cron name actually runs
       rollups.ts      Daily rank rollups — storage control and alert baselines
@@ -284,6 +307,12 @@ Each has a test.
 12. **Series differ by more than colour.** Three stroke patterns as well as
     three hues, because clients print these charts. The palette itself is
     checked with the data-viz validator rather than judged by eye.
+13. **One alert per condition, not one per day.** The signature is stable while
+    a condition persists and changes when it is genuinely a new one; the partial
+    unique index makes a repeat a no-op insert.
+14. **Never alert on a single check.** Neither side of a comparison may rest on
+    a day that aggregated fewer than two checks — and such a day cannot resolve
+    an alert either.
 
 ---
 

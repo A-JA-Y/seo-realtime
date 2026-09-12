@@ -819,3 +819,91 @@ line. The relief rule applies and is satisfied deliberately: every
 the reconciliation prose, so the colour never carries the number alone.
 
 Dark is a separately stepped set, not an inversion of light.
+
+---
+
+## M7 — alerts
+
+### 62. The signature bucket is never a date
+
+§9 specifies `sha256(type + keyword_target_id + bucket)` and a partial unique
+index on `signature WHERE resolved_at IS NULL`. The index handles "do not
+duplicate an open alert"; the bucket decides what counts as the SAME alert.
+
+A date is the obvious bucket and the wrong one: it makes a condition that
+persists for a fortnight raise fourteen alerts, one a day, which is how an
+alerting system becomes something people filter to a folder.
+
+What each bucket actually is:
+
+| kind                                                       | bucket                   | why                                                                                     |
+| ---------------------------------------------------------- | ------------------------ | --------------------------------------------------------------------------------------- |
+| state (`lost_top_10`, `entered_top_10`, `lost_from_index`) | empty                    | there is one way to be in that state                                                    |
+| move (`rank_drop`, `rank_gain`)                            | the position moved FROM  | 5 → 15 and a later 15 → 40 are two problems; re-detecting the same 5 → 15 hourly is one |
+| event (`ranking_url_changed`, `new_competitor_top_3`)      | the new URL / the domain | the thing that happened IS the identity                                                 |
+
+This makes resolution load-bearing rather than cosmetic. An open alert holds
+its signature, so an engine that only ever opened alerts would fire each
+condition exactly once and never again. Both the engine (condition cleared) and
+a person (dealt with it) can close one.
+
+### 63. An older re-run must not resolve a newer alert
+
+Found by running the engine over demo data out of order.
+
+Evaluating 2026-09-10 after 2026-09-12 resolved the alerts 09-12 had raised —
+the condition did not hold on the older day, so the engine dutifully closed
+them. That freed their signatures, and the next forward run raised every
+ongoing condition again as if it were new. Backfilling a week would have
+re-notified the lot.
+
+`created_at` cannot fix this: it records when the job RAN, not which day's data
+it read, and those differ on exactly the runs that trigger the bug. So every
+candidate carries `payload.day`, and resolution is gated on
+`(payload->>'day')::date <= <day being evaluated>`.
+
+Covered by an integration test that runs a newer day, then an older one, and
+asserts nothing was resolved. Removing the guard fails it.
+
+### 64. A rollup built from one check IS that check
+
+§9: "Baselines come from `daily_rank_rollups`, using `best_rank_group`, never a
+single check." It is tempting to read that as satisfied by reading a rollup.
+It is not — `best_rank_group` over a one-check day is that check's rank, and
+`found_count = 0` over a one-check day is one flaky miss.
+
+Two places this bites in practice: the day a property is onboarded, and the
+current day before its second check of the day. Both would have raised a
+critical "no longer in the results" from a single miss.
+
+So the gate is on `checks_count`, not on the existence of a rollup row, and it
+covers RESOLVING as well as raising: a day we cannot judge is not evidence that
+a condition cleared, and auto-resolving on one frees the signature — turning
+one ongoing problem into a fresh notification every time a thin day comes
+round.
+
+### 65. The anti-pattern guard caught my own routes
+
+Both new alert routes imported the raw `db` handle, and `env-boundary.test.ts`
+failed the build for it. The guard was right: the writes were scoped by
+convention (`eq(alerts.propertyId, scope.propertyId)` written out by hand at
+each call site) rather than structurally.
+
+Alert mutations now live on the scope object next to the reads —
+`markAlertRead`, `resolveAlert`, `markAllAlertsRead` — so the property
+predicate is applied by the thing that performed the tenancy check, and
+`assertAlertAccess` resolves the owning property in the same step that checks
+it. A route can no longer forget either half.
+
+### 66. A truncated request body is a 400, not a 500
+
+`request.json()` throws a `SyntaxError` on an empty or truncated body, which
+reached the catch-all in `handleRoute` and was logged as an unhandled server
+error.
+
+It is not one, and it happens without an attacker: a `fetch` aborted by a
+navigation arrives with its headers and no body. Observed for real while
+driving the alerts page — a mark-all click during an in-flight refresh.
+
+`readJson()` now turns it into a typed 400, so a malformed request stops
+looking like a server fault in the logs.
