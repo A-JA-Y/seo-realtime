@@ -1,0 +1,107 @@
+{
+  "_provenance": "SYNTHETIC \u2014 the awkward rows: a lookalike domain that must NOT match, a suffix-trick domain that must NOT match, a subdomain that MUST match, a null url, an unparseable url, and an item type this code has never seen.",
+  "version": "0.1.20260901",
+  "status_code": 20000,
+  "status_message": "Ok.",
+  "time": "3.4521 sec.",
+  "cost": 0.0006,
+  "tasks_count": 1,
+  "tasks_error": 0,
+  "tasks": [
+    {
+      "id": "09121400-1234-0139-0000-abcdef123456",
+      "status_code": 20000,
+      "status_message": "Ok.",
+      "time": "3.3 sec.",
+      "cost": 0.0006,
+      "result_count": 1,
+      "path": [
+        "v3",
+        "serp",
+        "google",
+        "organic",
+        "task_get",
+        "advanced"
+      ],
+      "data": {
+        "api": "serp",
+        "function": "task_get",
+        "se": "google",
+        "se_type": "organic",
+        "keyword": "prestige sector 150 noida",
+        "location_code": 1007742,
+        "language_code": "en",
+        "device": "mobile",
+        "os": "android",
+        "depth": 100,
+        "tag": "TARGET_ID"
+      },
+      "result": [
+        {
+          "keyword": "prestige sector 150 noida",
+          "type": "organic",
+          "se_domain": "google.co.in",
+          "location_code": 1007742,
+          "language_code": "en",
+          "check_url": "https://www.google.co.in/search?q=x",
+          "datetime": "2026-09-12 14:03:22 +00:00",
+          "spell": null,
+          "refinement_chips": null,
+          "item_types": [
+            "organic",
+            "unknown_future_block"
+          ],
+          "se_results_count": 1240000,
+          "items_count": 6,
+          "items": [
+            {
+              "type": "organic",
+              "rank_group": 1,
+              "rank_absolute": 1,
+              "domain": "notprestigenoidasector150.com",
+              "url": "https://notprestigenoidasector150.com/",
+              "title": "Lookalike"
+            },
+            {
+              "type": "organic",
+              "rank_group": 2,
+              "rank_absolute": 2,
+              "domain": "prestigenoidasector150.com.evil.example",
+              "url": "https://prestigenoidasector150.com.evil.example/",
+              "title": "Suffix trick"
+            },
+            {
+              "type": "organic",
+              "rank_group": null,
+              "rank_absolute": null,
+              "domain": "broken.example",
+              "url": null,
+              "title": null
+            },
+            {
+              "type": "organic",
+              "rank_group": 4,
+              "rank_absolute": 4,
+              "domain": "malformed.example",
+              "url": "not a url"
+            },
+            {
+              "type": "organic",
+              "rank_group": 5,
+              "rank_absolute": 5,
+              "domain": "blog.prestigenoidasector150.com",
+              "url": "https://blog.prestigenoidasector150.com/news",
+              "title": "Our blog"
+            },
+            {
+              "type": "unknown_future_block",
+              "rank_group": 1,
+              "rank_absolute": 6,
+              "something_new": true
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

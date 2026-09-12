@@ -1,0 +1,32 @@
+{
+  "_provenance": "SYNTHETIC \u2014 task_get for a task the provider could not complete. The envelope is 20000 but the TASK carries the error, and result is null.",
+  "version": "0.1.20260901",
+  "status_code": 20000,
+  "status_message": "Ok.",
+  "time": "0.1 sec.",
+  "cost": 0,
+  "tasks_count": 1,
+  "tasks_error": 1,
+  "tasks": [
+    {
+      "id": "09121400-3333-0139-0000-cccccccccccc",
+      "status_code": 40102,
+      "status_message": "Task handler timeout.",
+      "time": "0.01 sec.",
+      "cost": 0,
+      "result_count": 0,
+      "path": [
+        "v3",
+        "serp",
+        "google",
+        "organic",
+        "task_get",
+        "advanced"
+      ],
+      "data": {
+        "tag": "TARGET_C"
+      },
+      "result": null
+    }
+  ]
+}

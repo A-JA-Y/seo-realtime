@@ -38,7 +38,7 @@ UI is labelled with its source.
 |---|---|
 | **M1 — Foundation** | **Complete.** Next.js 15 + strict TS + Tailwind v4, Zod env validation, full Drizzle schema + migration, idempotent seed, health route, setup verification scripts |
 | **M2 — Search Console ingestion** | **Complete against fixtures.** JWT auth, hourly job with the documented dimension fallback, `fresh` + `final` writers, resumable 16-month backfill, the single read-precedence function, retry policy, structured logging, `ingest_runs`. **Not yet verified against the live property** — see below |
-| M3 — DataForSEO ingestion | Not started |
+| **M3 — DataForSEO ingestion** | **Complete against fixtures.** Batched `task_post`, secret-guarded pingback webhook, the parser, trimmed payload storage, live "check now" with its cooldown. **No live SERP has been fetched** — see below |
 | M4 — Cron + ops | Not started |
 | M5 — Auth + tenancy | Not started |
 | M6 — Dashboard | Not started |
@@ -65,6 +65,12 @@ Two things are genuinely unknown until you run `pnpm verify:gsc`:
 
 `pnpm verify:gsc --save-fixtures` answers both and rewrites the fixtures with
 real captures. Everything else in M2 is verified against a real Postgres.
+
+The same applies to M3: `src/test/fixtures/dataforseo/*.json` are hand-written
+to the documented advanced-SERP shape. `pnpm verify:dataforseo --live` fetches a
+real one ($0.0020) and saves it alongside. The parser, the batching, the webhook
+and the idempotency are all verified against a real Postgres; only the *response
+shape* is assumed.
 
 ---
 
@@ -122,6 +128,9 @@ src/
       seed.ts         Idempotent seed
       seed-data.ts    Property, keywords and location codes — verify before paid runs
     ingest/
+      dataforseo-client.ts  HTTP Basic, batched task_post, Zod-validated responses
+      serp-parse.ts   THE SERP parser: rank_group vs rank_absolute, competitors, features
+      serp.ts         Batching, pingback handling, live check-now
       gsc-client.ts   JWT auth, Zod-validated responses, dimension key parsing
       gsc-series.ts   THE read-precedence resolver. Pure — no database import
       gsc-read.ts     One indexed range scan, then the resolver
@@ -130,6 +139,7 @@ src/
       runs.ts         ingest_runs lifecycle
   app/
     api/health/       Liveness + schema check
+    api/webhooks/dataforseo/  Pingback. 401 unauthenticated, 200 for everything else
   test/
     setup.ts          Offline-by-default test bootstrap
     fixtures/         READ fixtures/README.md — the GSC ones are synthetic

@@ -5,7 +5,14 @@
 | File | Source | Status |
 |---|---|---|
 | `gsc/*.json` | **Hand-written** from Google's Search Analytics reference | ⚠️ SYNTHETIC |
+| `dataforseo/*.json` | **Hand-written** to DataForSEO's documented advanced-SERP shape | ⚠️ SYNTHETIC |
 | `dataforseo-live-advanced.json` | `pnpm verify:dataforseo --live` | Real, once captured |
+
+The DataForSEO fixtures model the cases §13 names — found, not-found, two of our
+own URLs ranking, `rank_group` diverging from `rank_absolute`, missing fields,
+an AI Overview present — plus a lookalike domain (`notexample.com`) and a
+suffix-trick domain (`example.com.evil.test`) that must **not** match, and a
+subdomain that must. They are built to the documented shape, not captured.
 
 The Search Console fixtures were written against the documented response shape,
 **not captured from a live call** — the credentials to make that call did not

@@ -1,0 +1,54 @@
+{
+  "_provenance": "SYNTHETIC \u2014 task_post acknowledgement. Note per-task status codes: 20100 is 'Task Created', and a task can fail individually while the envelope is 20000.",
+  "version": "0.1.20260901",
+  "status_code": 20000,
+  "status_message": "Ok.",
+  "time": "0.2 sec.",
+  "cost": 0.0012,
+  "tasks_count": 2,
+  "tasks_error": 1,
+  "tasks": [
+    {
+      "id": "09121400-1111-0139-0000-aaaaaaaaaaaa",
+      "status_code": 20100,
+      "status_message": "Task Created.",
+      "time": "0.01 sec.",
+      "cost": 0.0006,
+      "result_count": 0,
+      "path": [
+        "v3",
+        "serp",
+        "google",
+        "organic",
+        "task_post"
+      ],
+      "data": {
+        "keyword": "prestige sector 150 noida",
+        "location_code": 1007742,
+        "tag": "TARGET_A"
+      },
+      "result": null
+    },
+    {
+      "id": "09121400-2222-0139-0000-bbbbbbbbbbbb",
+      "status_code": 40501,
+      "status_message": "Invalid Field: 'location_code'.",
+      "time": "0.01 sec.",
+      "cost": 0,
+      "result_count": 0,
+      "path": [
+        "v3",
+        "serp",
+        "google",
+        "organic",
+        "task_post"
+      ],
+      "data": {
+        "keyword": "bad keyword",
+        "location_code": 999999,
+        "tag": "TARGET_B"
+      },
+      "result": null
+    }
+  ]
+}

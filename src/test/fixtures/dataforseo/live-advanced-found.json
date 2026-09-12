@@ -1,0 +1,693 @@
+{
+  "_provenance": "SYNTHETIC \u2014 hand-built to DataForSEO's documented advanced-SERP shape. Replace with a real capture via `pnpm verify:dataforseo --live`. Models the headline case: rank_group 7 but rank_absolute 13, with an AI Overview, local pack, images block, PAA and two ads above.",
+  "version": "0.1.20260901",
+  "status_code": 20000,
+  "status_message": "Ok.",
+  "time": "3.4521 sec.",
+  "cost": 0.0006,
+  "tasks_count": 1,
+  "tasks_error": 0,
+  "tasks": [
+    {
+      "id": "09121400-1234-0139-0000-abcdef123456",
+      "status_code": 20000,
+      "status_message": "Ok.",
+      "time": "3.3 sec.",
+      "cost": 0.0006,
+      "result_count": 1,
+      "path": [
+        "v3",
+        "serp",
+        "google",
+        "organic",
+        "task_get",
+        "advanced"
+      ],
+      "data": {
+        "api": "serp",
+        "function": "task_get",
+        "se": "google",
+        "se_type": "organic",
+        "keyword": "prestige sector 150 noida",
+        "location_code": 1007742,
+        "language_code": "en",
+        "device": "mobile",
+        "os": "android",
+        "depth": 100,
+        "tag": "TARGET_ID"
+      },
+      "result": [
+        {
+          "keyword": "prestige sector 150 noida",
+          "type": "organic",
+          "se_domain": "google.co.in",
+          "location_code": 1007742,
+          "language_code": "en",
+          "check_url": "https://www.google.co.in/search?q=x",
+          "datetime": "2026-09-12 14:03:22 +00:00",
+          "spell": null,
+          "refinement_chips": null,
+          "item_types": [
+            "ai_overview",
+            "images",
+            "local_pack",
+            "organic",
+            "paid",
+            "people_also_ask",
+            "video"
+          ],
+          "se_results_count": 1240000,
+          "items_count": 21,
+          "items": [
+            {
+              "type": "ai_overview",
+              "rank_group": 1,
+              "rank_absolute": 1,
+              "asynchronous_ai_overview": true,
+              "items": [
+                {
+                  "type": "ai_overview_element",
+                  "title": "Overview",
+                  "text": "......................................................................................................................................................"
+                }
+              ]
+            },
+            {
+              "type": "local_pack",
+              "rank_group": 1,
+              "rank_absolute": 2,
+              "title": "Places",
+              "domain": "google.com",
+              "url": "https://maps.google.com/x",
+              "rating": {
+                "value": 4.4
+              }
+            },
+            {
+              "type": "images",
+              "rank_group": 1,
+              "rank_absolute": 3,
+              "items": [
+                {
+                  "type": "images_element",
+                  "alt": "img",
+                  "image_url": "https://x/y.jpg"
+                },
+                {
+                  "type": "images_element",
+                  "alt": "img",
+                  "image_url": "https://x/y.jpg"
+                },
+                {
+                  "type": "images_element",
+                  "alt": "img",
+                  "image_url": "https://x/y.jpg"
+                },
+                {
+                  "type": "images_element",
+                  "alt": "img",
+                  "image_url": "https://x/y.jpg"
+                },
+                {
+                  "type": "images_element",
+                  "alt": "img",
+                  "image_url": "https://x/y.jpg"
+                },
+                {
+                  "type": "images_element",
+                  "alt": "img",
+                  "image_url": "https://x/y.jpg"
+                },
+                {
+                  "type": "images_element",
+                  "alt": "img",
+                  "image_url": "https://x/y.jpg"
+                },
+                {
+                  "type": "images_element",
+                  "alt": "img",
+                  "image_url": "https://x/y.jpg"
+                }
+              ]
+            },
+            {
+              "type": "paid",
+              "rank_group": 1,
+              "rank_absolute": 4,
+              "domain": "ads-rival.com",
+              "url": "https://ads-rival.com/",
+              "title": "Ad"
+            },
+            {
+              "type": "paid",
+              "rank_group": 2,
+              "rank_absolute": 5,
+              "domain": "ads-rival2.com",
+              "url": "https://ads-rival2.com/",
+              "title": "Ad 2"
+            },
+            {
+              "type": "organic",
+              "rank_group": 1,
+              "rank_absolute": 6,
+              "domain": "99acres.com",
+              "url": "https://99acres.com/prestige-sector-150",
+              "title": "99acres.com page",
+              "description": "A long snippet that dominates payload size A long snippet that dominates payload size A long snippet that dominates payload size A long snippet that dominates payload size A long snippet that dominates payload size A long snippet that dominates payload size ",
+              "breadcrumb": "99acres.com \u203a page",
+              "is_featured_snippet": false,
+              "about_this_result": {
+                "type": "about_this_result_element",
+                "url": "https://99acres.com/prestige-sector-150"
+              },
+              "cache_url": "https://webcache.googleusercontent.com/99acres.com",
+              "related_search_url": "https://google.com/search?q=x",
+              "timestamp": "2026-09-12 14:00:00 +00:00",
+              "highlighted": [
+                "sector",
+                "150"
+              ],
+              "links": null,
+              "rating": null,
+              "price": null,
+              "rectangle": null,
+              "main_domain": "99acres.com",
+              "relative_url": "/prestige-sector-150",
+              "pre_snippet": null,
+              "extended_snippet": null,
+              "website_name": "99acres.com",
+              "amp_version": false,
+              "is_image": false,
+              "is_video": false,
+              "is_malicious": false,
+              "is_web_story": false
+            },
+            {
+              "type": "organic",
+              "rank_group": 2,
+              "rank_absolute": 7,
+              "domain": "magicbricks.com",
+              "url": "https://magicbricks.com/prestige",
+              "title": "magicbricks.com page",
+              "description": "A long snippet that dominates payload size A long snippet that dominates payload size A long snippet that dominates payload size A long snippet that dominates payload size A long snippet that dominates payload size A long snippet that dominates payload size ",
+              "breadcrumb": "magicbricks.com \u203a page",
+              "is_featured_snippet": false,
+              "about_this_result": {
+                "type": "about_this_result_element",
+                "url": "https://magicbricks.com/prestige"
+              },
+              "cache_url": "https://webcache.googleusercontent.com/magicbricks.com",
+              "related_search_url": "https://google.com/search?q=x",
+              "timestamp": "2026-09-12 14:00:00 +00:00",
+              "highlighted": [
+                "sector",
+                "150"
+              ],
+              "links": null,
+              "rating": null,
+              "price": null,
+              "rectangle": null,
+              "main_domain": "magicbricks.com",
+              "relative_url": "/prestige",
+              "pre_snippet": null,
+              "extended_snippet": null,
+              "website_name": "magicbricks.com",
+              "amp_version": false,
+              "is_image": false,
+              "is_video": false,
+              "is_malicious": false,
+              "is_web_story": false
+            },
+            {
+              "type": "people_also_ask",
+              "rank_group": 1,
+              "rank_absolute": 8,
+              "items": [
+                {
+                  "type": "people_also_ask_element",
+                  "title": "Q?"
+                },
+                {
+                  "type": "people_also_ask_element",
+                  "title": "Q?"
+                },
+                {
+                  "type": "people_also_ask_element",
+                  "title": "Q?"
+                },
+                {
+                  "type": "people_also_ask_element",
+                  "title": "Q?"
+                }
+              ]
+            },
+            {
+              "type": "organic",
+              "rank_group": 3,
+              "rank_absolute": 9,
+              "domain": "housing.com",
+              "url": "https://housing.com/noida/prestige",
+              "title": "housing.com page",
+              "description": "A long snippet that dominates payload size A long snippet that dominates payload size A long snippet that dominates payload size A long snippet that dominates payload size A long snippet that dominates payload size A long snippet that dominates payload size ",
+              "breadcrumb": "housing.com \u203a page",
+              "is_featured_snippet": false,
+              "about_this_result": {
+                "type": "about_this_result_element",
+                "url": "https://housing.com/noida/prestige"
+              },
+              "cache_url": "https://webcache.googleusercontent.com/housing.com",
+              "related_search_url": "https://google.com/search?q=x",
+              "timestamp": "2026-09-12 14:00:00 +00:00",
+              "highlighted": [
+                "sector",
+                "150"
+              ],
+              "links": null,
+              "rating": null,
+              "price": null,
+              "rectangle": null,
+              "main_domain": "housing.com",
+              "relative_url": "/noida/prestige",
+              "pre_snippet": null,
+              "extended_snippet": null,
+              "website_name": "housing.com",
+              "amp_version": false,
+              "is_image": false,
+              "is_video": false,
+              "is_malicious": false,
+              "is_web_story": false
+            },
+            {
+              "type": "organic",
+              "rank_group": 4,
+              "rank_absolute": 10,
+              "domain": "squareyards.com",
+              "url": "https://squareyards.com/prestige-150",
+              "title": "squareyards.com page",
+              "description": "A long snippet that dominates payload size A long snippet that dominates payload size A long snippet that dominates payload size A long snippet that dominates payload size A long snippet that dominates payload size A long snippet that dominates payload size ",
+              "breadcrumb": "squareyards.com \u203a page",
+              "is_featured_snippet": false,
+              "about_this_result": {
+                "type": "about_this_result_element",
+                "url": "https://squareyards.com/prestige-150"
+              },
+              "cache_url": "https://webcache.googleusercontent.com/squareyards.com",
+              "related_search_url": "https://google.com/search?q=x",
+              "timestamp": "2026-09-12 14:00:00 +00:00",
+              "highlighted": [
+                "sector",
+                "150"
+              ],
+              "links": null,
+              "rating": null,
+              "price": null,
+              "rectangle": null,
+              "main_domain": "squareyards.com",
+              "relative_url": "/prestige-150",
+              "pre_snippet": null,
+              "extended_snippet": null,
+              "website_name": "squareyards.com",
+              "amp_version": false,
+              "is_image": false,
+              "is_video": false,
+              "is_malicious": false,
+              "is_web_story": false
+            },
+            {
+              "type": "organic",
+              "rank_group": 5,
+              "rank_absolute": 11,
+              "domain": "nobroker.in",
+              "url": "https://nobroker.in/prestige",
+              "title": "nobroker.in page",
+              "description": "A long snippet that dominates payload size A long snippet that dominates payload size A long snippet that dominates payload size A long snippet that dominates payload size A long snippet that dominates payload size A long snippet that dominates payload size ",
+              "breadcrumb": "nobroker.in \u203a page",
+              "is_featured_snippet": false,
+              "about_this_result": {
+                "type": "about_this_result_element",
+                "url": "https://nobroker.in/prestige"
+              },
+              "cache_url": "https://webcache.googleusercontent.com/nobroker.in",
+              "related_search_url": "https://google.com/search?q=x",
+              "timestamp": "2026-09-12 14:00:00 +00:00",
+              "highlighted": [
+                "sector",
+                "150"
+              ],
+              "links": null,
+              "rating": null,
+              "price": null,
+              "rectangle": null,
+              "main_domain": "nobroker.in",
+              "relative_url": "/prestige",
+              "pre_snippet": null,
+              "extended_snippet": null,
+              "website_name": "nobroker.in",
+              "amp_version": false,
+              "is_image": false,
+              "is_video": false,
+              "is_malicious": false,
+              "is_web_story": false
+            },
+            {
+              "type": "organic",
+              "rank_group": 6,
+              "rank_absolute": 12,
+              "domain": "proptiger.com",
+              "url": "https://proptiger.com/prestige",
+              "title": "proptiger.com page",
+              "description": "A long snippet that dominates payload size A long snippet that dominates payload size A long snippet that dominates payload size A long snippet that dominates payload size A long snippet that dominates payload size A long snippet that dominates payload size ",
+              "breadcrumb": "proptiger.com \u203a page",
+              "is_featured_snippet": false,
+              "about_this_result": {
+                "type": "about_this_result_element",
+                "url": "https://proptiger.com/prestige"
+              },
+              "cache_url": "https://webcache.googleusercontent.com/proptiger.com",
+              "related_search_url": "https://google.com/search?q=x",
+              "timestamp": "2026-09-12 14:00:00 +00:00",
+              "highlighted": [
+                "sector",
+                "150"
+              ],
+              "links": null,
+              "rating": null,
+              "price": null,
+              "rectangle": null,
+              "main_domain": "proptiger.com",
+              "relative_url": "/prestige",
+              "pre_snippet": null,
+              "extended_snippet": null,
+              "website_name": "proptiger.com",
+              "amp_version": false,
+              "is_image": false,
+              "is_video": false,
+              "is_malicious": false,
+              "is_web_story": false
+            },
+            {
+              "type": "organic",
+              "rank_group": 7,
+              "rank_absolute": 13,
+              "domain": "prestigenoidasector150.com",
+              "url": "https://prestigenoidasector150.com/",
+              "title": "Prestige Sector 150 Noida",
+              "description": "A long snippet that dominates payload size A long snippet that dominates payload size A long snippet that dominates payload size A long snippet that dominates payload size A long snippet that dominates payload size A long snippet that dominates payload size ",
+              "breadcrumb": "prestigenoidasector150.com \u203a page",
+              "is_featured_snippet": false,
+              "about_this_result": {
+                "type": "about_this_result_element",
+                "url": "https://prestigenoidasector150.com/"
+              },
+              "cache_url": "https://webcache.googleusercontent.com/prestigenoidasector150.com",
+              "related_search_url": "https://google.com/search?q=x",
+              "timestamp": "2026-09-12 14:00:00 +00:00",
+              "highlighted": [
+                "sector",
+                "150"
+              ],
+              "links": null,
+              "rating": null,
+              "price": null,
+              "rectangle": null,
+              "main_domain": "prestigenoidasector150.com",
+              "relative_url": "/",
+              "pre_snippet": null,
+              "extended_snippet": null,
+              "website_name": "prestigenoidasector150.com",
+              "amp_version": false,
+              "is_image": false,
+              "is_video": false,
+              "is_malicious": false,
+              "is_web_story": false
+            },
+            {
+              "type": "organic",
+              "rank_group": 8,
+              "rank_absolute": 14,
+              "domain": "commonfloor.com",
+              "url": "https://commonfloor.com/prestige",
+              "title": "commonfloor.com page",
+              "description": "A long snippet that dominates payload size A long snippet that dominates payload size A long snippet that dominates payload size A long snippet that dominates payload size A long snippet that dominates payload size A long snippet that dominates payload size ",
+              "breadcrumb": "commonfloor.com \u203a page",
+              "is_featured_snippet": false,
+              "about_this_result": {
+                "type": "about_this_result_element",
+                "url": "https://commonfloor.com/prestige"
+              },
+              "cache_url": "https://webcache.googleusercontent.com/commonfloor.com",
+              "related_search_url": "https://google.com/search?q=x",
+              "timestamp": "2026-09-12 14:00:00 +00:00",
+              "highlighted": [
+                "sector",
+                "150"
+              ],
+              "links": null,
+              "rating": null,
+              "price": null,
+              "rectangle": null,
+              "main_domain": "commonfloor.com",
+              "relative_url": "/prestige",
+              "pre_snippet": null,
+              "extended_snippet": null,
+              "website_name": "commonfloor.com",
+              "amp_version": false,
+              "is_image": false,
+              "is_video": false,
+              "is_malicious": false,
+              "is_web_story": false
+            },
+            {
+              "type": "organic",
+              "rank_group": 9,
+              "rank_absolute": 15,
+              "domain": "realtynmore.com",
+              "url": "https://realtynmore.com/prestige",
+              "title": "realtynmore.com page",
+              "description": "A long snippet that dominates payload size A long snippet that dominates payload size A long snippet that dominates payload size A long snippet that dominates payload size A long snippet that dominates payload size A long snippet that dominates payload size ",
+              "breadcrumb": "realtynmore.com \u203a page",
+              "is_featured_snippet": false,
+              "about_this_result": {
+                "type": "about_this_result_element",
+                "url": "https://realtynmore.com/prestige"
+              },
+              "cache_url": "https://webcache.googleusercontent.com/realtynmore.com",
+              "related_search_url": "https://google.com/search?q=x",
+              "timestamp": "2026-09-12 14:00:00 +00:00",
+              "highlighted": [
+                "sector",
+                "150"
+              ],
+              "links": null,
+              "rating": null,
+              "price": null,
+              "rectangle": null,
+              "main_domain": "realtynmore.com",
+              "relative_url": "/prestige",
+              "pre_snippet": null,
+              "extended_snippet": null,
+              "website_name": "realtynmore.com",
+              "amp_version": false,
+              "is_image": false,
+              "is_video": false,
+              "is_malicious": false,
+              "is_web_story": false
+            },
+            {
+              "type": "organic",
+              "rank_group": 10,
+              "rank_absolute": 16,
+              "domain": "indiaproperty.com",
+              "url": "https://indiaproperty.com/prestige",
+              "title": "indiaproperty.com page",
+              "description": "A long snippet that dominates payload size A long snippet that dominates payload size A long snippet that dominates payload size A long snippet that dominates payload size A long snippet that dominates payload size A long snippet that dominates payload size ",
+              "breadcrumb": "indiaproperty.com \u203a page",
+              "is_featured_snippet": false,
+              "about_this_result": {
+                "type": "about_this_result_element",
+                "url": "https://indiaproperty.com/prestige"
+              },
+              "cache_url": "https://webcache.googleusercontent.com/indiaproperty.com",
+              "related_search_url": "https://google.com/search?q=x",
+              "timestamp": "2026-09-12 14:00:00 +00:00",
+              "highlighted": [
+                "sector",
+                "150"
+              ],
+              "links": null,
+              "rating": null,
+              "price": null,
+              "rectangle": null,
+              "main_domain": "indiaproperty.com",
+              "relative_url": "/prestige",
+              "pre_snippet": null,
+              "extended_snippet": null,
+              "website_name": "indiaproperty.com",
+              "amp_version": false,
+              "is_image": false,
+              "is_video": false,
+              "is_malicious": false,
+              "is_web_story": false
+            },
+            {
+              "type": "organic",
+              "rank_group": 11,
+              "rank_absolute": 17,
+              "domain": "makaan.com",
+              "url": "https://makaan.com/prestige",
+              "title": "makaan.com page",
+              "description": "A long snippet that dominates payload size A long snippet that dominates payload size A long snippet that dominates payload size A long snippet that dominates payload size A long snippet that dominates payload size A long snippet that dominates payload size ",
+              "breadcrumb": "makaan.com \u203a page",
+              "is_featured_snippet": false,
+              "about_this_result": {
+                "type": "about_this_result_element",
+                "url": "https://makaan.com/prestige"
+              },
+              "cache_url": "https://webcache.googleusercontent.com/makaan.com",
+              "related_search_url": "https://google.com/search?q=x",
+              "timestamp": "2026-09-12 14:00:00 +00:00",
+              "highlighted": [
+                "sector",
+                "150"
+              ],
+              "links": null,
+              "rating": null,
+              "price": null,
+              "rectangle": null,
+              "main_domain": "makaan.com",
+              "relative_url": "/prestige",
+              "pre_snippet": null,
+              "extended_snippet": null,
+              "website_name": "makaan.com",
+              "amp_version": false,
+              "is_image": false,
+              "is_video": false,
+              "is_malicious": false,
+              "is_web_story": false
+            },
+            {
+              "type": "organic",
+              "rank_group": 12,
+              "rank_absolute": 18,
+              "domain": "olx.in",
+              "url": "https://olx.in/prestige",
+              "title": "olx.in page",
+              "description": "A long snippet that dominates payload size A long snippet that dominates payload size A long snippet that dominates payload size A long snippet that dominates payload size A long snippet that dominates payload size A long snippet that dominates payload size ",
+              "breadcrumb": "olx.in \u203a page",
+              "is_featured_snippet": false,
+              "about_this_result": {
+                "type": "about_this_result_element",
+                "url": "https://olx.in/prestige"
+              },
+              "cache_url": "https://webcache.googleusercontent.com/olx.in",
+              "related_search_url": "https://google.com/search?q=x",
+              "timestamp": "2026-09-12 14:00:00 +00:00",
+              "highlighted": [
+                "sector",
+                "150"
+              ],
+              "links": null,
+              "rating": null,
+              "price": null,
+              "rectangle": null,
+              "main_domain": "olx.in",
+              "relative_url": "/prestige",
+              "pre_snippet": null,
+              "extended_snippet": null,
+              "website_name": "olx.in",
+              "amp_version": false,
+              "is_image": false,
+              "is_video": false,
+              "is_malicious": false,
+              "is_web_story": false
+            },
+            {
+              "type": "organic",
+              "rank_group": 13,
+              "rank_absolute": 19,
+              "domain": "www.prestigenoidasector150.com",
+              "url": "https://www.prestigenoidasector150.com/floor-plan",
+              "title": "Floor Plan",
+              "description": "A long snippet that dominates payload size A long snippet that dominates payload size A long snippet that dominates payload size A long snippet that dominates payload size A long snippet that dominates payload size A long snippet that dominates payload size ",
+              "breadcrumb": "www.prestigenoidasector150.com \u203a page",
+              "is_featured_snippet": false,
+              "about_this_result": {
+                "type": "about_this_result_element",
+                "url": "https://www.prestigenoidasector150.com/floor-plan"
+              },
+              "cache_url": "https://webcache.googleusercontent.com/www.prestigenoidasector150.com",
+              "related_search_url": "https://google.com/search?q=x",
+              "timestamp": "2026-09-12 14:00:00 +00:00",
+              "highlighted": [
+                "sector",
+                "150"
+              ],
+              "links": null,
+              "rating": null,
+              "price": null,
+              "rectangle": null,
+              "main_domain": "www.prestigenoidasector150.com",
+              "relative_url": "/floor-plan",
+              "pre_snippet": null,
+              "extended_snippet": null,
+              "website_name": "www.prestigenoidasector150.com",
+              "amp_version": false,
+              "is_image": false,
+              "is_video": false,
+              "is_malicious": false,
+              "is_web_story": false
+            },
+            {
+              "type": "video",
+              "rank_group": 1,
+              "rank_absolute": 20,
+              "items": [
+                {
+                  "type": "video_element",
+                  "title": "Tour",
+                  "url": "https://youtube.com/x"
+                }
+              ]
+            },
+            {
+              "type": "organic",
+              "rank_group": 14,
+              "rank_absolute": 21,
+              "domain": "quikr.com",
+              "url": "https://quikr.com/prestige",
+              "title": "quikr.com page",
+              "description": "A long snippet that dominates payload size A long snippet that dominates payload size A long snippet that dominates payload size A long snippet that dominates payload size A long snippet that dominates payload size A long snippet that dominates payload size ",
+              "breadcrumb": "quikr.com \u203a page",
+              "is_featured_snippet": false,
+              "about_this_result": {
+                "type": "about_this_result_element",
+                "url": "https://quikr.com/prestige"
+              },
+              "cache_url": "https://webcache.googleusercontent.com/quikr.com",
+              "related_search_url": "https://google.com/search?q=x",
+              "timestamp": "2026-09-12 14:00:00 +00:00",
+              "highlighted": [
+                "sector",
+                "150"
+              ],
+              "links": null,
+              "rating": null,
+              "price": null,
+              "rectangle": null,
+              "main_domain": "quikr.com",
+              "relative_url": "/prestige",
+              "pre_snippet": null,
+              "extended_snippet": null,
+              "website_name": "quikr.com",
+              "amp_version": false,
+              "is_image": false,
+              "is_video": false,
+              "is_malicious": false,
+              "is_web_story": false
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

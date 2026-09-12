@@ -324,3 +324,101 @@ Two reported findings were **refuted** rather than fixed:
 - **"`withRetry` should default to 4 attempts."** §12 says "3 retries"; §7 says
   "3 attempts". The default follows §7's more precise wording. `attempts` is a
   parameter for callers who want the other reading.
+
+---
+
+# M3 — DataForSEO ingestion
+
+## 29. `checked_at` is the PROVIDER's timestamp, not our receipt time
+
+`serp_checks` has `UNIQUE (keyword_target_id, checked_at)`, which only enforces
+idempotency if `checked_at` is stable across redeliveries.
+
+DataForSEO redelivers a pingback whenever the endpoint fails to return 200.
+Stamping `now()` would make every redelivery a *new data point for the same
+SERP* — the rank would appear twice in the series, and the alert engine would
+see movement that never happened. The provider's `datetime` field identifies the
+SERP itself, so a redelivery collapses onto the same row.
+
+`parseProviderDatetime` handles the `"2026-09-12 14:03:22 +00:00"` shape, which
+`Date.parse` does not accept portably, and honours a non-UTC offset rather than
+assuming UTC. Our receipt time is the fallback when the provider sends nothing.
+
+## 30. The pingback route returns 200 on failure — deliberately
+
+§6 says so, and the reason is worth stating plainly: DataForSEO retries a
+non-200 pingback indefinitely, and each retry triggers another billed
+`task_get`. A parse bug would therefore become a permanent redelivery loop that
+also spends the balance.
+
+Failures are recorded as a `failed` `ingest_runs` row instead, which is where
+`/ops` looks. The only non-200 this route can return is **401**, for a caller
+that failed the secret check — and that check runs before anything is fetched,
+so an unauthenticated hit costs nothing.
+
+## 31. Domain matching: subdomains count, lookalikes do not
+
+§6 says "match on registrable hostname, ignoring `www.` and scheme — NOT
+full-URL equality". Full-URL equality would only ever match the homepage.
+
+Two decisions the spec leaves open:
+
+- **Subdomains match.** An agency tracking `example.com` wants to know when
+  `blog.example.com` outranks it. Treating it as a competitor would put the
+  client's own site in their competitor table.
+- **The leading dot is load-bearing.** `host.endsWith(own)` matches
+  `notexample.com` against `example.com`; `host.endsWith('.' + own)` does not.
+  Without it a competitor's rank is recorded as ours — a number that looks real
+  and belongs to someone else. Both that case and the
+  `example.com.evil.test` suffix trick are in the fixtures and the tests.
+
+## 32. `task_post` does not retry connection failures
+
+`withRetry` retries network-level errors by default, because for a read that is
+exactly what retries are for. `task_post` and `live/advanced` opt out
+(`retryNetworkErrors: false`): both bill on acceptance, so a connection reset
+*after* the server took the batch would double-charge on retry.
+
+A 429 or 5xx is still retried — those mean the request was rejected, not
+accepted.
+
+## 33. A per-task failure inside a 200 envelope is still a failure
+
+DataForSEO reports failure in three places: the HTTP status, the envelope
+`status_code`, and each task's own `status_code`. All three can disagree — a
+200 with envelope `20000` can carry a task that failed on a bad
+`location_code`.
+
+Counting those as submitted would make a keyword silently stop being tracked:
+no error anywhere, just a series that quietly stops updating. `enqueueSerpBatch`
+counts them as rejected and marks the run `partial`.
+
+## 34. The live-check cooldown keys off live checks only
+
+§10 rate-limits "check now" to 1 per 5 minutes per keyword. The obvious
+implementation reads `keyword_targets.last_checked_at` — but that advances on
+every *scheduled* pingback too, so a routine check landing a minute earlier
+would consume the user's manual allowance and the button would appear broken.
+
+The cooldown is derived from the most recent check with
+`provider = 'dataforseo-live'` instead. No new state: the distinction is already
+in the column §4 gave us.
+
+## 35. The setup checker uses the real client and the real parser
+
+`pnpm verify:dataforseo --live` previously had its own fetch code and its own
+inline domain matching. A setup checker with a second implementation can pass
+while the real ingest fails, which is the opposite of its purpose. It now calls
+`createDataForSeoClient` and `parseSerpResult`, so what it prints is what the
+ingest would store.
+
+## 36. DataForSEO fixtures are hand-written too
+
+`src/test/fixtures/dataforseo/*.json` are built to DataForSEO's documented
+advanced-SERP shape, not captured — no credentials exist in the build
+environment. They model the cases §13 names, plus the two domain-matching traps
+above. `pnpm verify:dataforseo --live` writes a real capture next to them.
+
+The headline fixture deliberately reproduces the spec's own example: `rank_group`
+7 but `rank_absolute` 13, with an AI Overview, a local pack, an images block,
+People Also Ask and two ads above — a furniture gap of 6.

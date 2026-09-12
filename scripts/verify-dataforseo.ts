@@ -1,85 +1,24 @@
-/**
- * DataForSEO credential + location check — requirements.md §§6–7.
- *
- *   pnpm verify:dataforseo              balance, then resolve Indian locations
- *   pnpm verify:dataforseo --locations  locations only, no balance call
- *   pnpm verify:dataforseo --live       ALSO run one live SERP (costs $0.0020)
- *
- * The live SERP is opt-in because it spends real money. Everything else is
- * free. When you do run it, the raw response is written to
- * src/test/fixtures/ — the parser's unit tests need the real response shape,
- * including the fields DataForSEO returns inconsistently.
- */
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
-import { z } from 'zod';
-
-import { dataForSeoAuthHeader } from '@/lib/env';
+import {
+  COST_PER_SERP,
+  createDataForSeoClient,
+  isTaskOk,
+} from '@/server/ingest/dataforseo-client';
 import { redactError } from '@/lib/redact';
+import { parseSerpResult } from '@/server/ingest/serp-parse';
 import { LOCATIONS, SEED_KEYWORDS, SEED_PROPERTY } from '@/server/db/seed-data';
 
-const BASE_URL = 'https://api.dataforseo.com';
-const LIVE_SERP_COST_USD = 0.002;
+const LIVE_SERP_COST_USD = COST_PER_SERP.live;
 
-/* ── Response schemas. External data is validated, never trusted. ─────────── */
-
-const envelope = <T extends z.ZodTypeAny>(result: T) =>
-  z.object({
-    status_code: z.number(),
-    status_message: z.string(),
-    tasks: z
-      .array(
-        z.object({
-          id: z.string().optional(),
-          status_code: z.number(),
-          status_message: z.string(),
-          cost: z.number().optional(),
-          result: z.union([result, z.null()]).optional(),
-        }),
-      )
-      .optional(),
-  });
-
-const userDataResult = z.array(
-  z.object({
-    money: z.object({ balance: z.number(), total: z.number().optional() }).optional(),
-    rates: z.object({ limits: z.object({ minute: z.number().optional() }).optional() }).optional(),
-  }),
-);
-
-const locationsResult = z.array(
-  z.object({
-    location_code: z.number(),
-    location_name: z.string(),
-    location_code_parent: z.number().nullable().optional(),
-    country_iso_code: z.string().nullable().optional(),
-    location_type: z.string().nullable().optional(),
-  }),
-);
-
-const serpItem = z
-  .object({
-    type: z.string(),
-    rank_group: z.number().nullable().optional(),
-    rank_absolute: z.number().nullable().optional(),
-    domain: z.string().nullable().optional(),
-    url: z.string().nullable().optional(),
-    title: z.string().nullable().optional(),
-  })
-  // DataForSEO adds item fields without notice; keeping the extras here is a
-  // deliberate exception to the no-passthrough rule, because the raw payload is
-  // exactly what we are trying to capture.
-  .loose();
-
-const serpResult = z.array(
-  z.object({
-    keyword: z.string(),
-    location_code: z.number().optional(),
-    items_count: z.number().nullable().optional(),
-    items: z.array(serpItem).nullable().optional(),
-  }),
-);
+/**
+ * Uses the SAME client and parser the ingest does.
+ *
+ * A setup checker with its own HTTP code and its own parsing can pass while the
+ * real ingest fails — which is the opposite of what a setup checker is for.
+ */
+const client = createDataForSeoClient();
 
 /* ── Helpers ──────────────────────────────────────────────────────────────── */
 
@@ -89,45 +28,13 @@ function heading(text: string) {
 const pass = (t: string) => console.log(`  ✓ ${t}`);
 const fail = (t: string) => console.log(`  ✗ ${t}`);
 
-async function call<T extends z.ZodTypeAny>(
-  endpoint: string,
-  schema: T,
-  body?: unknown,
-): Promise<z.infer<ReturnType<typeof envelope<T>>>> {
-  const response = await fetch(`${BASE_URL}${endpoint}`, {
-    method: body ? 'POST' : 'GET',
-    headers: {
-      Authorization: dataForSeoAuthHeader(),
-      ...(body ? { 'Content-Type': 'application/json' } : {}),
-    },
-    ...(body ? { body: JSON.stringify(body) } : {}),
-  });
-
-  if (response.status === 401) {
-    throw new Error(
-      'HTTP 401 — credentials rejected. DATAFORSEO_PASSWORD must be the API ' +
-        'password from the dashboard, which is NOT your account login password.',
-    );
-  }
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status} from ${endpoint}`);
-  }
-
-  const parsed = envelope(schema).safeParse(await response.json());
-  if (!parsed.success) {
-    throw new Error(`Unexpected response shape from ${endpoint}: ${parsed.error.issues[0]?.message}`);
-  }
-  return parsed.data;
-}
-
 /* ── Checks ───────────────────────────────────────────────────────────────── */
 
 async function checkBalance(): Promise<boolean> {
   heading('A. appendix/user_data — credentials and balance');
 
   try {
-    const data = await call('/v3/appendix/user_data', userDataResult);
-    const balance = data.tasks?.[0]?.result?.[0]?.money?.balance;
+    const balance = await client.balance();
 
     if (typeof balance !== 'number') {
       fail('Authenticated, but no balance in the response.');
@@ -156,8 +63,7 @@ async function checkLocations(): Promise<boolean> {
   console.log('  Codes change. Never hardcode them, never copy them from a blog post.\n');
 
   try {
-    const data = await call('/v3/serp/google/locations', locationsResult);
-    const all = data.tasks?.[0]?.result ?? [];
+    const all = await client.locations();
 
     if (all.length === 0) {
       fail('No locations returned.');
@@ -214,75 +120,72 @@ async function checkLiveSerp(): Promise<boolean> {
   console.log(`  cost:     $${LIVE_SERP_COST_USD.toFixed(4)} — this call spends real money\n`);
 
   try {
-    const raw = await fetch(`${BASE_URL}/v3/serp/google/organic/live/advanced`, {
-      method: 'POST',
-      headers: { Authorization: dataForSeoAuthHeader(), 'Content-Type': 'application/json' },
-      body: JSON.stringify([
-        {
-          keyword,
-          location_code: location.locationCode,
-          language_code: 'en',
-          device: 'mobile',
-          os: 'android',
-          depth: 100,
-        },
-      ]),
+    const envelope = await client.liveAdvanced({
+      keyword,
+      location_code: location.locationCode,
+      language_code: 'en',
+      device: 'mobile',
+      os: 'android',
+      depth: 100,
+      tag: 'verify',
     });
 
-    if (!raw.ok) throw new Error(`HTTP ${raw.status}`);
-    const json: unknown = await raw.json();
-
-    const parsed = envelope(serpResult).safeParse(json);
-    if (!parsed.success) {
-      fail(`Unexpected response shape: ${parsed.error.issues[0]?.message}`);
+    const task = envelope.tasks?.[0];
+    if (!task || !isTaskOk(task.status_code)) {
+      fail(`Provider returned ${task?.status_code ?? 'no task'}: ${task?.status_message ?? ''}`);
       return false;
     }
 
-    const task = parsed.data.tasks?.[0];
-    const items = task?.result?.[0]?.items ?? [];
-    const organic = items.filter((i) => i.type === 'organic');
+    const result = task.result?.[0];
+    if (!result) {
+      fail('Live call returned no result.');
+      return false;
+    }
 
-    pass(`${items.length} SERP elements, ${organic.length} organic`);
+    const items = result.items ?? [];
+    pass(`${items.length} SERP elements`);
 
-    // Registrable-hostname match, ignoring www. — not full-URL equality.
-    const mine = organic.filter((i) =>
-      (i.domain ?? '').replace(/^www\./, '').toLowerCase().endsWith(SEED_PROPERTY.domain),
-    );
+    // The REAL parser, not a second implementation. If this disagrees with
+    // what the ingest would store, the check has told you nothing.
+    const parsed = parseSerpResult(result, SEED_PROPERTY.domain);
 
     console.log('');
-    if (mine.length === 0) {
+    if (!parsed.found) {
       console.log(`    ${SEED_PROPERTY.domain} is NOT in the top 100 for this keyword.`);
       console.log('    That is a valid result — it stores as found=false with NULL ranks,');
       console.log('    never as position 100.');
     } else {
-      const best = [...mine].sort((a, b) => (a.rank_group ?? 999) - (b.rank_group ?? 999))[0]!;
       console.log(`    ${SEED_PROPERTY.domain}`);
-      console.log(`      rank_group:    ${best.rank_group}   ← which blue link you are`);
-      console.log(`      rank_absolute: ${best.rank_absolute}   ← how far down the page you are`);
+      console.log(`      rank_group:    ${parsed.rankGroup}   ← which blue link you are`);
+      console.log(`      rank_absolute: ${parsed.rankAbsolute}   ← how far down the page you are`);
       console.log(
-        `      furniture gap: ${(best.rank_absolute ?? 0) - (best.rank_group ?? 0)} non-organic blocks above you`,
+        `      furniture gap: ${(parsed.rankAbsolute ?? 0) - (parsed.rankGroup ?? 0)} non-organic blocks above you`,
       );
-      console.log(`      url:           ${best.url}`);
-      if (mine.length > 1) console.log(`      (${mine.length} of your URLs rank; best shown)`);
+      console.log(`      url:           ${parsed.rankingUrl}`);
+      if (parsed.allRankingUrls.length > 1) {
+        console.log(`      (${parsed.allRankingUrls.length} of your URLs rank; best shown)`);
+      }
     }
 
-    const featureTypes = [...new Set(items.map((i) => i.type))].filter((t) => t !== 'organic');
-    console.log(`\n    SERP features present: ${featureTypes.join(', ') || 'none'}`);
+    const present = Object.entries(parsed.serpFeatures)
+      .filter(([, v]) => v === true || (typeof v === 'number' && v > 0))
+      .map(([k, v]) => (typeof v === 'number' ? `${k}=${v}` : k));
+    console.log(`\n    SERP features present: ${present.join(', ') || 'none'}`);
 
     console.log('\n    Competitors above you:');
-    for (const item of organic.filter((i) => !mine.includes(i)).slice(0, 5)) {
-      console.log(`      ${String(item.rank_group).padStart(3)}  ${item.domain}`);
+    for (const competitor of parsed.competingDomains.slice(0, 5)) {
+      console.log(`      ${String(competitor.rank_group).padStart(3)}  ${competitor.domain}`);
     }
 
-    // Commit the real shape so the parser tests are not written against a guess.
-    const dir = path.join(process.cwd(), 'src/test/fixtures');
+    // Commit the real shape so the parser tests stop running against a guess.
+    const dir = path.join(process.cwd(), 'src/test/fixtures/dataforseo');
     await mkdir(dir, { recursive: true });
-    const file = path.join(dir, 'dataforseo-live-advanced.json');
-    await writeFile(file, JSON.stringify(json, null, 2));
+    const file = path.join(dir, 'live-advanced-real.json');
+    await writeFile(file, JSON.stringify(envelope, null, 2));
     console.log(`\n    Raw response saved → ${path.relative(process.cwd(), file)}`);
-    console.log('    Commit it. The parser tests run against this, not against a guess.');
+    console.log('    Commit it — the committed fixtures are hand-written until you do.');
 
-    if (typeof task?.cost === 'number') console.log(`\n    Actual cost: $${task.cost.toFixed(4)}`);
+    if (typeof task.cost === 'number') console.log(`\n    Actual cost: $${task.cost.toFixed(4)}`);
     return true;
   } catch (error) {
     fail(redactError(error));
