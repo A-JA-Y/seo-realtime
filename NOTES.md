@@ -13,7 +13,7 @@ produced a bug or a deploy failure. Each says what changed and why.
 UNIQUE (keyword_id, gsc_date, gsc_hour, data_state)
 ```
 
-**Problem.** In Postgres, `NULL` values in a unique constraint are *distinct*
+**Problem.** In Postgres, `NULL` values in a unique constraint are _distinct_
 from one another by default. `gsc_hour` is `NULL` on every `fresh` and `final`
 row (§5 says reconciliation writes `gsc_hour = NULL`). So for daily rows the
 constraint can never fire: `ON CONFLICT DO UPDATE` never triggers, and running
@@ -133,7 +133,7 @@ two writers: the hourly job (`hourly_all` → `'hourly'`) and reconciliation
 
 **Why, rather than leaving the enum value unwritten.** Reconciliation settles
 exactly T−4. Without a `fresh` writer, the daily figure for T−3, T−2, T−1 and
-T−0 is *our* impression-weighted aggregate of whatever hour buckets Google
+T−0 is _our_ impression-weighted aggregate of whatever hour buckets Google
 happened to return — which understates total impressions and biases the
 position toward the keyword's busiest hours. Worse, that understatement is
 self-concealing: domain rule 6's low-confidence check keys off the same
@@ -148,21 +148,21 @@ free and the quota is 1,200/minute per site.
 
 Five constraints, added in `drizzle/0001_gsc_ingest.sql`:
 
-| Constraint | Enforces |
-|---|---|
-| `no_position_without_impressions` | `impressions > 0 OR position IS NULL` |
-| `position_range` | `position IS NULL OR position >= 1` |
-| `counts_nonnegative` | `clicks >= 0 AND impressions >= 0` |
-| `hour_range` | `gsc_hour IS NULL OR gsc_hour BETWEEN 0 AND 23` |
-| `hour_matches_state` | `(data_state = 'hourly') = (gsc_hour IS NOT NULL)` |
+| Constraint                        | Enforces                                           |
+| --------------------------------- | -------------------------------------------------- |
+| `no_position_without_impressions` | `impressions > 0 OR position IS NULL`              |
+| `position_range`                  | `position IS NULL OR position >= 1`                |
+| `counts_nonnegative`              | `clicks >= 0 AND impressions >= 0`                 |
+| `hour_range`                      | `gsc_hour IS NULL OR gsc_hour BETWEEN 0 AND 23`    |
+| `hour_matches_state`              | `(data_state = 'hourly') = (gsc_hour IS NOT NULL)` |
 
 These are the invariants the read resolver would otherwise have to detect and
 report at runtime. Enforcing them in the database makes the violating rows
-*unstorable*, which converts a class of silent wrong answers into a loud write
+_unstorable_, which converts a class of silent wrong answers into a loud write
 failure at the point the bad data was produced.
 
 `position >= 1` is the one that earns its keep: position 0 does not exist, and a
-0 stored here renders *above* position 1 on the inverted rank axis §11 requires
+0 stored here renders _above_ position 1 on the inverted rank axis §11 requires
 — better than first place. The mapper drops a sub-1 position to NULL and logs
 it rather than letting the write fail.
 
@@ -177,13 +177,13 @@ completed_at, updated_at)`.
 Two designs were rejected:
 
 **Derive progress from `gsc_snapshots`** (`MIN(gsc_date)` per keyword) needs no
-new state, and is wrong. That table records only *positive* observations —
+new state, and is wrong. That table records only _positive_ observations —
 Google omits dates with no impressions entirely — so a window in which a keyword
 had no traffic writes no rows, `MIN(gsc_date)` does not advance, and the walk
 either loops or redoes the same window forever.
 
 **A single `properties.gsc_backfill_cursor`** is simpler, and leaves a keyword
-added *after* the property finished backfilling permanently blank: the property
+added _after_ the property finished backfilling permanently blank: the property
 is already marked done. §10 exposes `POST /api/properties/:id/keywords`, so
 that is a routine operation, not an edge case. There is a test for it.
 
@@ -214,11 +214,11 @@ tested.
 
 Verified against `date-fns-tz`, not reasoned about:
 
-| Pacific date | Elapsed hours | Distinct `gsc_hour` labels |
-|---|---|---|
-| 2026-03-08 (spring forward) | 23 | 23 — 02:00 never happens |
-| 2026-06-15 (ordinary) | 24 | 24 |
-| 2026-11-01 (fall back) | **25** | **24** — 01:00 happens twice |
+| Pacific date                | Elapsed hours | Distinct `gsc_hour` labels   |
+| --------------------------- | ------------- | ---------------------------- |
+| 2026-03-08 (spring forward) | 23            | 23 — 02:00 never happens     |
+| 2026-06-15 (ordinary)       | 24            | 24                           |
+| 2026-11-01 (fall back)      | **25**        | **24** — 01:00 happens twice |
 
 The fall-back day is the trap. It is 25 hours long, but `gsc_hour` is a
 `SMALLINT` 0–23, so two real hours share label 1. Two consequences:
@@ -247,7 +247,7 @@ labelled as synthetic in `src/test/fixtures/README.md`, and
 The specific open question is the `hour` dimension key format: Google's
 reference does not state whether it is a bare `"13"` or a full
 `"2026-09-12T13:00:00-07:00"`. `parseHourKey` handles both and takes the hour
-*literally* out of the string rather than parsing it into a `Date` — a `Date`
+_literally_ out of the string rather than parsing it into a `Date` — a `Date`
 round trip converts through the runtime's local zone and silently shifts the
 hour, which is the class of bug domain rule 4 forbids.
 
@@ -296,19 +296,19 @@ had the same shape and the same fix.
 
 ## The rest
 
-| # | Defect | Consequence |
-|---|---|---|
-| 18 | Deactivating a keyword wedged the property's backfill | `keywordsRemaining` never reached 0; every later run did nothing |
-| 19 | A failing keyword re-attempted the same window at full speed | A hot loop against Google for the whole 45s budget |
-| 20 | The backfill budget was per property, not per invocation | Ten properties asked for 450s inside a 60s function |
-| 21 | The per-date hourly fallback discarded failed dates silently | A partial day stored, run reported `success` |
-| 22 | One keyword's 400 downgraded the whole property, racily | 30 days on the slow path from an unrelated 400 |
-| 23 | `backfilled_at` was stamped for a property with no keywords | A write-once lie that could never be corrected |
-| 24 | Rows committed before a later failure were not counted | Understated `rows_written` |
-| 25 | Two divergent weighted-mean implementations | 7.7% of inputs differed by 0.01, surfacing as a revision Google never made |
-| 26 | `getGscRevisions` ordered oldest-first while documenting newest-first | — |
-| 27 | `keywordsProcessed` counted windows, not keywords | — |
-| 28 | Retry-After was obeyed exactly, with no jitter | Every throttled caller retries at the same instant |
+| #   | Defect                                                                | Consequence                                                                |
+| --- | --------------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| 18  | Deactivating a keyword wedged the property's backfill                 | `keywordsRemaining` never reached 0; every later run did nothing           |
+| 19  | A failing keyword re-attempted the same window at full speed          | A hot loop against Google for the whole 45s budget                         |
+| 20  | The backfill budget was per property, not per invocation              | Ten properties asked for 450s inside a 60s function                        |
+| 21  | The per-date hourly fallback discarded failed dates silently          | A partial day stored, run reported `success`                               |
+| 22  | One keyword's 400 downgraded the whole property, racily               | 30 days on the slow path from an unrelated 400                             |
+| 23  | `backfilled_at` was stamped for a property with no keywords           | A write-once lie that could never be corrected                             |
+| 24  | Rows committed before a later failure were not counted                | Understated `rows_written`                                                 |
+| 25  | Two divergent weighted-mean implementations                           | 7.7% of inputs differed by 0.01, surfacing as a revision Google never made |
+| 26  | `getGscRevisions` ordered oldest-first while documenting newest-first | —                                                                          |
+| 27  | `keywordsProcessed` counted windows, not keywords                     | —                                                                          |
+| 28  | Retry-After was obeyed exactly, with no jitter                        | Every throttled caller retries at the same instant                         |
 
 Two reported findings were **refuted** rather than fixed:
 
@@ -335,8 +335,8 @@ Two reported findings were **refuted** rather than fixed:
 idempotency if `checked_at` is stable across redeliveries.
 
 DataForSEO redelivers a pingback whenever the endpoint fails to return 200.
-Stamping `now()` would make every redelivery a *new data point for the same
-SERP* — the rank would appear twice in the series, and the alert engine would
+Stamping `now()` would make every redelivery a _new data point for the same
+SERP_ — the rank would appear twice in the series, and the alert engine would
 see movement that never happened. The provider's `datetime` field identifies the
 SERP itself, so a redelivery collapses onto the same row.
 
@@ -377,7 +377,7 @@ Two decisions the spec leaves open:
 `withRetry` retries network-level errors by default, because for a read that is
 exactly what retries are for. `task_post` and `live/advanced` opt out
 (`retryNetworkErrors: false`): both bill on acceptance, so a connection reset
-*after* the server took the batch would double-charge on retry.
+_after_ the server took the batch would double-charge on retry.
 
 A 429 or 5xx is still retried — those mean the request was rejected, not
 accepted.
@@ -397,7 +397,7 @@ counts them as rejected and marks the run `partial`.
 
 §10 rate-limits "check now" to 1 per 5 minutes per keyword. The obvious
 implementation reads `keyword_targets.last_checked_at` — but that advances on
-every *scheduled* pingback too, so a routine check landing a minute earlier
+every _scheduled_ pingback too, so a routine check landing a minute earlier
 would consume the user's manual allowance and the button would appear broken.
 
 The cooldown is derived from the most recent check with
@@ -439,9 +439,9 @@ at-least-once scheduler — both saw the same targets as due and both posted
 them. At 400 tracked combinations that is **800 billed tasks instead of 400**,
 every time it happens.
 
-Worse, `last_checked_at` only advances when a *result* lands. A target whose
+Worse, `last_checked_at` only advances when a _result_ lands. A target whose
 pingback was lost (a failed task, a misconfigured webhook) stayed permanently
-due and was re-submitted and re-billed on *every run, forever*, with nothing to
+due and was re-submitted and re-billed on _every run, forever_, with nothing to
 show for it.
 
 `claimDueTargets` now selects and stamps `last_enqueued_at` in **one statement**
@@ -449,8 +449,8 @@ with `FOR UPDATE SKIP LOCKED`, returning only the rows this invocation won. Two
 concurrent runs partition the work rather than duplicating it — verified
 against a live database, not reasoned about. Selection is gated on
 `last_enqueued_at` as well as `last_checked_at`, so an unhealthy target costs
-exactly its intended cadence and no more. A claim on a *rejected* task is
-released, since nothing was spent on it; a claim on a *failed batch* is held,
+exactly its intended cadence and no more. A claim on a _rejected_ task is
+released, since nothing was spent on it; a claim on a _failed batch_ is held,
 because a 502 or a reset can arrive after the provider accepted and billed it.
 
 ## 38. `task_post` retried 5xx, which can double-charge
@@ -467,7 +467,7 @@ acceptance calls narrow it to 429 only.
 
 Two simultaneous "check now" presses both read "no recent check" and both spent
 $0.0020. There is no transaction to reach for — the Neon HTTP driver has none —
-so the cooldown is now *claimed* by a single conditional `UPDATE ... RETURNING`
+so the cooldown is now _claimed_ by a single conditional `UPDATE ... RETURNING`
 on a dedicated `keyword_targets.last_live_check_at`. Postgres serialises the
 row; three concurrent presses now yield exactly one billed call.
 
@@ -503,7 +503,7 @@ UPDATE".
 ## 43. `--live` saved the PARSED envelope as the "real shape" fixture
 
 The whole point of capturing a real response is to record the fields our schemas
-*don't* model. Writing `JSON.stringify(envelope)` wrote the parser's projection
+_don't_ model. Writing `JSON.stringify(envelope)` wrote the parser's projection
 of the response — a fixture that can never falsify the schema, because
 re-parsing it is guaranteed to succeed.
 
@@ -563,7 +563,7 @@ timezone is the only defensible choice: "moved today" has to mean what the
 client means by today, and grouping a Noida property's checks by UTC would split
 every Indian evening across two rollup rows.
 
-This is *not* the Pacific-date rule from domain rule 4 — that governs Search
+This is _not_ the Pacific-date rule from domain rule 4 — that governs Search
 Console dates, which Google assigns. These are our own timestamps.
 
 Not-found checks count toward `checks_count` but not `found_count`, and are
@@ -609,7 +609,7 @@ forever — a scheduler retrying a cron is harmless.
 token". The role and organisation are there; the property list is not.
 
 A token is issued at login and lives for its whole lifetime. Putting grants in
-it means revoking a client's access takes effect only at their *next* login —
+it means revoking a client's access takes effect only at their _next_ login —
 so removing someone from an account leaves them reading it for hours. One
 indexed query per check is worth not having that window. It also keeps the
 cookie a fixed size regardless of how many properties an agency manages.
@@ -617,7 +617,7 @@ cookie a fixed size regardless of how many properties an agency manages.
 ## 52. Organisation is checked before role, for every role
 
 `canAccessProperty` checks that the property belongs to the principal's
-organisation *first*, and that check applies to `agency_admin` too. An admin is
+organisation _first_, and that check applies to `agency_admin` too. An admin is
 an admin of their own agency, not of the database. There is a test asserting
 org A's admin cannot read org B's property.
 
@@ -664,7 +664,7 @@ redirects would have received a 200 full of markup, which looks like success.
 
 Found by actually driving the flow with curl rather than by reading the code.
 
-The middleware is also *not* the security boundary, and says so: it checks only
+The middleware is also _not_ the security boundary, and says so: it checks only
 that a session cookie is **present**, without verifying its signature. It runs
 on the edge runtime, where the database is unreachable — treating it as the
 boundary would put the real checks somewhere that cannot perform them. Every
@@ -703,3 +703,119 @@ by the real role check. `/ops` shows ingest errors, per-property freshness and
 spend across the whole organisation, so it is the one page an `agency_member`
 should not see either. Verified end to end: the seeded client account gets
 "restricted to agency administrators"; the admin account gets the dashboard.
+
+---
+
+## M6 — dashboard
+
+### 56. The two series share a time axis, not a day axis
+
+The obvious dashboard chart puts a day on the x axis and three values on it.
+That cannot be built honestly here.
+
+`gsc_snapshots.gsc_date` is a **Pacific** calendar day, assigned by Google and
+never shifted (domain rule 4). `daily_rank_rollups.day` buckets `checked_at` by
+the **property's** timezone, because "moved today" has to mean what the client
+means by today (see §? / `src/server/ops/rollups.ts`). Asia/Kolkata is UTC+5:30
+and Pacific is UTC−7/−8, so the two grids are 12.5–13.5 hours apart. A chart
+with one "day" axis silently asserts they are the same day.
+
+So the chart takes **two arrays** on a shared numeric time axis:
+
+- live checks at their true `checked_at`;
+- Search Console days anchored at **midday of their own Pacific date** — the
+  same anchor `getReconciliation` uses, and a defensible centre for a figure
+  that describes a whole day.
+
+Recharts supports per-`<Line data={...}>` arrays against a numeric axis, which
+is what makes this possible while keeping `connectNulls={false}` meaningful:
+each series' nulls are its own genuine gaps, not an artefact of the other
+series having a point at a timestamp this one does not.
+
+Merging into one array and setting `connectNulls={true}` on the GSC line would
+bridge the check-only timestamps — and would also bridge genuinely missing GSC
+days, which is exactly what acceptance criterion 3 forbids.
+
+### 57. `Intl.DateTimeFormat` without a `timeZone` formats in the runtime zone
+
+`formatGscDate` built a UTC-midnight `Date` from a `YYYY-MM-DD` string and
+formatted it with no `timeZone` option. `Intl` then used the _runtime_ zone, so
+on any host behind UTC the date rendered a day early — every Search Console date
+on the dashboard, off by one.
+
+The suite passed under UTC (Vercel's default, and the container's). `pnpm
+test:tz` caught it immediately. This is the same class as the `date-fns addDays`
+bug in §? and the same lesson: any date arithmetic or formatting that does not
+name its timezone is reading the machine's.
+
+Fixed with `timeZone: 'UTC'` on the formatter — the instant is UTC midnight, so
+formatting it in UTC always yields the intended calendar day. The suite now runs
+green under UTC, America/Los_Angeles and Asia/Kolkata.
+
+`formatGscDate` also threw on a malformed string: `Number('a')` is `NaN`, not
+`undefined`, so the `=== undefined` guard passed it through to `Intl`, which
+throws on an invalid time value — taking down a whole page render over one bad
+row. Guarded with `Number.isFinite`.
+
+### 58. A second implementation of the precedence rule had crept in
+
+`keywordRows` carried an `impressions` CTE that re-derived "latest daily row,
+final > fresh > hourly" in SQL to fetch an impression count. §5 says that rule
+lives in exactly one function, and it does — `resolveGscSeries`. The CTE was a
+second definition that happened to agree.
+
+It would not have kept agreeing: the resolver does impression-weighted hourly
+aggregation, so the moment a keyword's freshest reading was an hourly aggregate,
+the table and the chart would have shown different numbers for the same keyword
+and both would have looked right.
+
+Removed. `keywordRows` now makes a second round trip through
+`getGscSeriesForKeywords` and attaches the reading in JS. One extra query; one
+definition of the rule.
+
+### 59. Dropping out of the top 100 is not a ranking-URL change
+
+`rankingUrlChanges` compared `rankingUrl` between consecutive checks. A
+not-found check has `ranking_url = NULL`, so a keyword that fell out of the top
+100 and came back on the same page produced two entries: `url → none` and
+`none → url`.
+
+Both are lies. Losing the ranking entirely is a different event with a different
+cause, already visible in the chart's not-found band and in the rank column. The
+event this list exists to surface — domain rule 7, Google quietly preferring a
+different page of yours at an unchanged position — was buried under it.
+
+Not-found checks are now skipped rather than treated as a transition to no URL,
+so a genuine swap that happened _across_ a not-found stretch is still reported,
+with both real ends. Mutation-tested: removing the skip fails three tests.
+
+### 60. Dark mode existed but nothing turned it on
+
+`globals.css` shipped a complete `.dark` token set from M1 and
+`@custom-variant dark (&:is(.dark *))`. Nothing ever added the class, so the
+dark palette was unreachable — `prefers-color-scheme: dark` did nothing, and the
+`dark:` utilities scattered through the components were dead code.
+
+Two fixes. The variant was `&:is(.dark *)`, which matches descendants of `.dark`
+but not `.dark` itself; it is now `&:where(.dark, .dark *)`. And a blocking
+script in `<head>` stamps the class from `localStorage` or the OS preference
+before first paint — deciding it in React means rendering light, hydrating, then
+flipping, which is a white flash on every navigation for a dark-mode user.
+
+### 61. The palette is computed, not chosen
+
+The three series colours were hand-picked OKLCH values. They are now the
+validated categorical slots 1–3 from the data-viz reference palette, checked
+with its validator at `--pairs all` in both modes:
+
+|                             | light | dark |
+| --------------------------- | ----- | ---- |
+| worst-pair CVD ΔE           | 9.2   | 9.4  |
+| worst-pair normal-vision ΔE | 24.0  | 20.9 |
+
+Aqua (`rank_absolute`) sits at 2.74:1 against the light surface, below the 3:1
+line. The relief rule applies and is satisfied deliberately: every
+`rank_absolute` value also appears as text in the tooltip, in the table, and in
+the reconciliation prose, so the colour never carries the number alone.
+
+Dark is a separately stepped set, not an inversion of light.
