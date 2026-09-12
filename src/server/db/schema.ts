@@ -79,6 +79,7 @@ export const ingestKind = pgEnum('ingest_kind', [
   'serp_batch',
   'rollup',
   'prune',
+  'alerts',
 ]);
 
 export const ingestStatus = pgEnum('ingest_status', ['running', 'success', 'partial', 'failed']);

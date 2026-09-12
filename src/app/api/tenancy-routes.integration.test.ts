@@ -5,6 +5,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 
 import { db } from '@/server/db';
 import {
+  alerts,
   keywordTargets,
   keywords,
   organizations,
@@ -35,7 +36,17 @@ vi.mock('@/server/auth/config', () => ({
 const hasDb = Boolean(process.env.TEST_DATABASE_URL);
 
 describe.skipIf(!hasDb)('cross-tenant isolation at the API layer', () => {
-  const ids = { orgA: '', orgB: '', propA1: '', propA2: '', propB1: '', kwA1: '', kwB1: '' };
+  const ids = {
+    orgA: '',
+    orgB: '',
+    propA1: '',
+    propA2: '',
+    propB1: '',
+    kwA1: '',
+    kwB1: '',
+    alertA1: '',
+    alertB1: '',
+  };
 
   let adminA: Principal;
   let clientA: Principal;
@@ -104,6 +115,34 @@ describe.skipIf(!hasDb)('cross-tenant isolation at the API layer', () => {
       locationName: 'India',
       device: 'desktop',
     });
+
+    const [alertA] = await db
+      .insert(alerts)
+      .values({
+        propertyId: ids.propA1,
+        keywordId: ids.kwA1,
+        type: 'rank_drop',
+        severity: 'warning',
+        title: 'route alpha alert',
+        body: 'route alpha body',
+        signature: `sig-a-${randomUUID()}`,
+      })
+      .returning();
+    ids.alertA1 = alertA!.id;
+
+    const [alertB] = await db
+      .insert(alerts)
+      .values({
+        propertyId: ids.propB1,
+        keywordId: ids.kwB1,
+        type: 'rank_drop',
+        severity: 'warning',
+        title: 'route bravo alert',
+        body: 'route bravo body',
+        signature: `sig-b-${randomUUID()}`,
+      })
+      .returning();
+    ids.alertB1 = alertB!.id;
   });
 
   afterAll(async () => {
@@ -126,6 +165,30 @@ describe.skipIf(!hasDb)('cross-tenant isolation at the API layer', () => {
     return GET(new Request(`https://x.test/api/keywords/${id}`), {
       params: Promise.resolve({ id }),
     });
+  };
+
+  const patchAlert = async (id: string, action: string) => {
+    const { PATCH } = await import('./alerts/[id]/route');
+    return PATCH(
+      new Request(`https://x.test/api/alerts/${id}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ action }),
+      }),
+      { params: Promise.resolve({ id }) },
+    );
+  };
+
+  const readAllAlerts = async (propertyId: string) => {
+    const { POST } = await import('./properties/[id]/alerts/route');
+    return POST(
+      new Request(`https://x.test/api/properties/${propertyId}/alerts`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ action: 'read-all' }),
+      }),
+      { params: Promise.resolve({ id: propertyId }) },
+    );
   };
 
   /* ── GET /api/properties ──────────────────────────────────────────────── */
@@ -246,6 +309,112 @@ describe.skipIf(!hasDb)('cross-tenant isolation at the API layer', () => {
         expect(text).not.toContain(ids.propB1);
         expect(text).not.toContain(ids.orgB);
       }
+    });
+  });
+
+  /* ── Alert mutations ──────────────────────────────────────────────────── */
+
+  describe('PATCH /api/alerts/:id', () => {
+    it('401s an anonymous request', async () => {
+      expect((await patchAlert(ids.alertA1, 'read')).status).toBe(401);
+    });
+
+    it('lets someone who may read the property mark their own alert read', async () => {
+      principal = clientA;
+      const response = await patchAlert(ids.alertA1, 'read');
+
+      expect(response.status).toBe(200);
+      expect((await response.json()).alert.readAt).not.toBeNull();
+    });
+
+    /*
+     * An alert is addressed by its own id, so the route cannot check tenancy
+     * until it knows whose alert it is — and the id is a uuid in a URL. This is
+     * the case that would leak if the lookup ran unscoped first.
+     */
+    it("403s an admin patching ANOTHER ORGANISATION'S alert", async () => {
+      principal = adminA;
+      expect((await patchAlert(ids.alertB1, 'read')).status).toBe(403);
+
+      const [untouched] = await db.select().from(alerts).where(eq(alerts.id, ids.alertB1));
+      expect(untouched?.readAt).toBeNull();
+    });
+
+    it('403s — not 404 — for an alert that does not exist', async () => {
+      principal = adminA;
+      const response = await patchAlert(randomUUID(), 'read');
+
+      expect(response.status).toBe(403);
+      expect((await response.json()).error.code).toBe('FORBIDDEN');
+    });
+
+    it('400s an unknown action rather than guessing', async () => {
+      principal = adminA;
+      const response = await patchAlert(ids.alertA1, 'delete-everything');
+
+      expect(response.status).toBe(400);
+      expect((await response.json()).error.code).toBe('INVALID_INPUT');
+    });
+
+    it('resolves, which frees the signature for a genuine recurrence', async () => {
+      principal = adminA;
+      const response = await patchAlert(ids.alertA1, 'resolve');
+
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body.alert.resolvedAt).not.toBeNull();
+      // Resolving also marks it read: an alert you closed is one you have seen.
+      expect(body.alert.readAt).not.toBeNull();
+    });
+  });
+
+  describe('POST /api/properties/:id/alerts', () => {
+    it('401s an anonymous request', async () => {
+      expect((await readAllAlerts(ids.propA1)).status).toBe(401);
+    });
+
+    it("403s marking another organisation's alerts read", async () => {
+      principal = adminA;
+      expect((await readAllAlerts(ids.propB1)).status).toBe(403);
+
+      const [untouched] = await db.select().from(alerts).where(eq(alerts.id, ids.alertB1));
+      expect(untouched?.readAt).toBeNull();
+    });
+
+    it('403s a client for an UNGRANTED property of their own organisation', async () => {
+      principal = clientA;
+      expect((await readAllAlerts(ids.propA2)).status).toBe(403);
+    });
+
+    it('marks only this property\u2019s alerts read', async () => {
+      await db.update(alerts).set({ readAt: null, resolvedAt: null });
+      principal = adminA;
+
+      const response = await readAllAlerts(ids.propA1);
+      expect(response.status).toBe(200);
+
+      const [a] = await db.select().from(alerts).where(eq(alerts.id, ids.alertA1));
+      const [b] = await db.select().from(alerts).where(eq(alerts.id, ids.alertB1));
+      expect(a?.readAt).not.toBeNull();
+      expect(b?.readAt).toBeNull();
+    });
+
+    it('400s a body that is not JSON, rather than 500ing', async () => {
+      // A fetch aborted by a navigation arrives with headers and no body. That
+      // is a malformed request, not a server fault, and the logs should say so.
+      principal = adminA;
+      const { POST } = await import('./properties/[id]/alerts/route');
+      const response = await POST(
+        new Request(`https://x.test/api/properties/${ids.propA1}/alerts`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: '',
+        }),
+        { params: Promise.resolve({ id: ids.propA1 }) },
+      );
+
+      expect(response.status).toBe(400);
+      expect((await response.json()).error.code).toBe('INVALID_INPUT');
     });
   });
 });

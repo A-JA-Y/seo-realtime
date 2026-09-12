@@ -51,6 +51,23 @@ export class ApiFailure extends Error {
 }
 
 /**
+ * Parse a JSON body, or fail with a typed 400.
+ *
+ * `request.json()` throws a `SyntaxError` on a body that is empty or truncated
+ * — which happens for real, not just to attackers: a fetch aborted by a
+ * navigation arrives with its headers and no body. Letting that reach the
+ * catch-all turns a malformed request into a 500 and files it as a server
+ * fault in the logs, which is the wrong place to go looking.
+ */
+export async function readJson(request: Request): Promise<unknown> {
+  try {
+    return await request.json();
+  } catch {
+    throw new ApiFailure('INVALID_INPUT', 'Body must be valid JSON.', 400);
+  }
+}
+
+/**
  * Run a route handler, turning known failures into typed responses.
  *
  * Anything unrecognised becomes a 500 with a stable code and no detail: the

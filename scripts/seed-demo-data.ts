@@ -191,11 +191,19 @@ async function main() {
           const furniture =
             (aiOverview ? 1 : 0) + (localPack ? 1 : 0) + (images ? 1 : 0) + paidCount;
 
-          // The ranking URL changes partway through — domain rule 7.
-          const rankingUrl =
-            back > 12
-              ? `https://${property.domain}/`
-              : `https://${property.domain}/${keyword.term.split(' ').slice(-1)[0]}`;
+          /*
+           * ONE keyword's ranking URL changes partway through — domain rule 7.
+           *
+           * Deliberately one and not all of them. Swapping every URL on the
+           * same day is easier to write and produces a wall of 26 identical
+           * alerts, which hides whether the detection works at all: the thing
+           * worth seeing is one swap standing out among keywords that did not
+           * move.
+           */
+          const swapped = keywordIndex === 2 && back <= 12;
+          const rankingUrl = swapped
+            ? `https://${property.domain}/${keyword.term.split(' ').slice(-1)[0]}`
+            : `https://${property.domain}/`;
 
           await db.insert(serpChecks).values({
             keywordTargetId: target.id,

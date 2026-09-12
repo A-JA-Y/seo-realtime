@@ -214,6 +214,35 @@ export async function assertKeywordTargetAccess(
   return target;
 }
 
+/**
+ * Resolve the property that owns an alert, then check access to it.
+ *
+ * Same shape as `assertKeywordTargetAccess`, and for the same reason: an alert
+ * is addressed by its own id, so tenancy cannot be checked until we know whose
+ * alert it is — and looking it up with an unscoped query first is precisely the
+ * leak. A missing alert and another tenant's alert both raise 403, so the
+ * endpoint is not an enumeration oracle.
+ */
+export async function assertAlertAccess(
+  principal: Principal | null | undefined,
+  alertId: string,
+): Promise<{ propertyId: string }> {
+  if (!principal) throw new UnauthorizedError();
+
+  const { alerts } = await import('@/server/db/schema');
+
+  const [alert] = await db
+    .select({ propertyId: alerts.propertyId })
+    .from(alerts)
+    .where(eq(alerts.id, alertId))
+    .limit(1);
+
+  if (!alert) throw new ForbiddenError();
+
+  await assertPropertyAccess(principal, alert.propertyId);
+  return alert;
+}
+
 /** Narrow a set of property ids to those in the principal's org. Used by `forProperty`. */
 export async function assertPropertiesInOrg(
   principal: Principal,

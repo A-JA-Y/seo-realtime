@@ -519,17 +519,29 @@ export interface AlertRow {
   title: string;
   body: string;
   keywordId: string | null;
+  keywordTargetId: string | null;
+  /** Always carries `day`: the rollup day the engine judged this on. */
+  payload: Record<string, unknown>;
   createdAt: Date;
   readAt: Date | null;
   resolvedAt: Date | null;
 }
 
-/** The in-app alert feed. There is no other delivery channel, by design (§9). */
+/**
+ * The in-app alert feed. There is no other delivery channel, by design (§9).
+ *
+ * Open and unread first, then open and read, then resolved — a feed ordered
+ * purely by time buries a critical alert from Tuesday under Thursday's
+ * informational ones.
+ */
 export async function listAlerts(scope: PropertyScope, limit = 100): Promise<AlertRow[]> {
   const rows = await scope.alerts();
 
+  const rank = (row: (typeof rows)[number]) =>
+    row.resolvedAt !== null ? 2 : row.readAt !== null ? 1 : 0;
+
   return rows
-    .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+    .sort((a, b) => rank(a) - rank(b) || b.createdAt.getTime() - a.createdAt.getTime())
     .slice(0, limit)
     .map((row) => ({
       id: row.id,
@@ -538,6 +550,8 @@ export async function listAlerts(scope: PropertyScope, limit = 100): Promise<Ale
       title: row.title,
       body: row.body,
       keywordId: row.keywordId,
+      keywordTargetId: row.keywordTargetId,
+      payload: (row.payload ?? {}) as Record<string, unknown>,
       createdAt: row.createdAt,
       readAt: row.readAt,
       resolvedAt: row.resolvedAt,

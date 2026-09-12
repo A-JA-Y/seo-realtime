@@ -49,3 +49,22 @@ jobs:
           curl -fsS --max-time 70 -X POST \
             "${{ secrets.APP_BASE_URL }}/api/cron/backfill-gsc" \
             -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}"
+
+      - name: Rebuild rollups, then evaluate alerts
+        # The order is load-bearing and the reason these share one step. §9's
+        # baselines come from `daily_rank_rollups`, so an alert run that went
+        # first would evaluate today against a rollup that does not exist yet
+        # and quietly find nothing — a silent alerting system, which is the
+        # failure mode nobody notices.
+        #
+        # Both are idempotent and both recompute from the per-check rows, so
+        # running them hourly costs a little CPU and buys near-realtime alerts
+        # instead of once-a-day ones.
+        if: always()
+        run: |
+          curl -fsS --max-time 70 -X POST \
+            "${{ secrets.APP_BASE_URL }}/api/cron/rollup" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}"
+          curl -fsS --max-time 70 -X POST \
+            "${{ secrets.APP_BASE_URL }}/api/cron/alerts" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}"

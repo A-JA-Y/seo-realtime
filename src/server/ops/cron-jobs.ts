@@ -6,6 +6,7 @@ import {
   reconcileGscFinal,
 } from '@/server/ingest/gsc';
 import { enqueueSerpBatch } from '@/server/ingest/serp';
+import { runAlertsForProperty } from '@/server/alerts/engine';
 import { runPruneJob } from './retention';
 import { runRollupJob } from './rollups';
 
@@ -76,6 +77,16 @@ async function runDaily(): Promise<JobOutcome> {
     }
   }
 
+  /*
+   * Alerts run AFTER the rollup, never before.
+   *
+   * §9 says baselines come from `daily_rank_rollups`, so an engine that ran
+   * first would evaluate today against a rollup that does not exist yet and
+   * quietly find nothing — a silent no-op, which is the worst failure mode an
+   * alerting system has.
+   */
+  steps.push(await perProperty('alerts', (id) => runAlertsForProperty(id)));
+
   const failed = steps.filter((s) => s.status === 'failed').length;
 
   return {
@@ -110,6 +121,7 @@ export const JOBS: Record<string, () => Promise<JobOutcome>> = {
   },
 
   rollup: async () => ({ job: 'rollup', status: 'success', detail: await runRollupJob() }),
+  alerts: () => perProperty('alerts', (id) => runAlertsForProperty(id)),
   prune: async () => ({ job: 'prune', status: 'success', detail: await runPruneJob() }),
   daily: runDaily,
 };

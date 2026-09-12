@@ -1,4 +1,4 @@
-import { and, eq, type SQL } from 'drizzle-orm';
+import { and, eq, isNull, sql, type SQL } from 'drizzle-orm';
 
 import { assertPropertyAccess, type Principal } from '@/server/auth/access';
 import { db } from '@/server/db';
@@ -74,6 +74,47 @@ export async function forProperty(principal: Principal | null | undefined, prope
     serpChecks: (extra?: SQL) => db.select().from(serpChecks).where(scope(serpChecks.propertyId, extra)),
 
     alerts: (extra?: SQL) => db.select().from(alerts).where(scope(alerts.propertyId, extra)),
+
+    /*
+     * Alert mutations live on the scope for the same reason the reads do: the
+     * property predicate is applied HERE, not by each caller remembering to.
+     * A route holding a scope has already passed tenancy, so these cannot
+     * touch another tenant's rows even if the alert id came from a URL.
+     */
+    async markAlertRead(alertId: string, read: boolean) {
+      const [row] = await db
+        .update(alerts)
+        .set({ readAt: read ? sql`now()` : null })
+        .where(and(eq(alerts.id, alertId), eq(alerts.propertyId, propertyId)))
+        .returning({ id: alerts.id, readAt: alerts.readAt, resolvedAt: alerts.resolvedAt });
+      return row;
+    },
+
+    /**
+     * Resolve an alert, and mark it read on the way.
+     *
+     * Resolving is not cosmetic: the partial unique index keys on
+     * `signature WHERE resolved_at IS NULL`, so an open alert holds its
+     * signature and suppresses a recurrence. Closing one frees it.
+     */
+    async resolveAlert(alertId: string) {
+      const [row] = await db
+        .update(alerts)
+        .set({ resolvedAt: sql`now()`, readAt: sql`coalesce(${alerts.readAt}, now())` })
+        .where(and(eq(alerts.id, alertId), eq(alerts.propertyId, propertyId)))
+        .returning({ id: alerts.id, readAt: alerts.readAt, resolvedAt: alerts.resolvedAt });
+      return row;
+    },
+
+    /** One statement, so it cannot half-apply. */
+    async markAllAlertsRead() {
+      const rows = await db
+        .update(alerts)
+        .set({ readAt: sql`now()` })
+        .where(and(eq(alerts.propertyId, propertyId), isNull(alerts.readAt)))
+        .returning({ id: alerts.id });
+      return rows.length;
+    },
 
     dailyRankRollups: (extra?: SQL) =>
       db
