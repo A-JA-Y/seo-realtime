@@ -20,8 +20,34 @@ export interface ApiError {
   error: { code: string; message: string };
 }
 
-export function apiError(code: string, message: string, status: number) {
-  return NextResponse.json<ApiError>({ error: { code, message } }, { status });
+export function apiError(
+  code: string,
+  message: string,
+  status: number,
+  headers?: Record<string, string>,
+) {
+  return NextResponse.json<ApiError>({ error: { code, message } }, { status, headers });
+}
+
+/**
+ * A failure a route deliberately raises, with the status it wants.
+ *
+ * Routes have failures beyond auth and validation — a rate limit, a provider
+ * that answered badly — and each needs its own code and status. Raising one of
+ * these keeps that mapping next to the logic that decided it, instead of
+ * widening this file with every route's vocabulary or letting a route hand back
+ * a raw NextResponse and skip the shared shape entirely.
+ */
+export class ApiFailure extends Error {
+  constructor(
+    readonly code: string,
+    message: string,
+    readonly status: number,
+    readonly headers?: Record<string, string>,
+  ) {
+    super(message);
+    this.name = 'ApiFailure';
+  }
 }
 
 /**
@@ -40,6 +66,10 @@ export async function handleRoute<T>(
   } catch (error) {
     if (error instanceof UnauthorizedError || error instanceof ForbiddenError) {
       return apiError(error.code, error.message, error.status);
+    }
+
+    if (error instanceof ApiFailure) {
+      return apiError(error.code, error.message, error.status, error.headers);
     }
 
     if (error instanceof z.ZodError) {

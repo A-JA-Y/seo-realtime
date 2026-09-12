@@ -21,7 +21,8 @@
     "verify:gsc": "tsx --env-file-if-exists=.env.local --env-file-if-exists=.env scripts/verify-gsc.ts",
     "verify:dataforseo": "tsx --env-file-if-exists=.env.local --env-file-if-exists=.env scripts/verify-dataforseo.ts",
     "test:integration": "vitest run src/**/*.integration.test.ts",
-    "test:tz": "TZ=America/Los_Angeles vitest run"
+    "test:tz": "TZ=America/Los_Angeles vitest run",
+    "db:demo": "tsx --env-file-if-exists=.env.local --env-file-if-exists=.env scripts/seed-demo-data.ts"
   },
   "dependencies": {
     "@neondatabase/serverless": "^1.0.1",
