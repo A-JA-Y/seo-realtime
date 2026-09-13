@@ -54,7 +54,16 @@ export function ReconciliationPanel({ data }: { data: Reconciliation }) {
               targets.map((target) => (
                 <div key={target.keywordTargetId}>
                   <p className="text-sm">
-                    {target.found ? (
+                    {/*
+                      Three states, not two. `null` means no check ran near this
+                      date — which is an absence of evidence, not a ranking
+                      collapse. Rendering it as the critical "not found" badge
+                      told clients their keyword had vanished every time SERP
+                      ingest paused while Search Console kept flowing.
+                    */}
+                    {target.found === null ? (
+                      <span className="text-muted-foreground">no check near this date</span>
+                    ) : target.found ? (
                       <>
                         <span className="font-semibold tabular-nums">#{target.rankGroup}</span>
                         <span className="text-muted-foreground"> organic</span>

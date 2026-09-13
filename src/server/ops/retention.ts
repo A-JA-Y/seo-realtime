@@ -60,22 +60,38 @@ export async function pruneSerpPayloads(days = PAYLOAD_RETENTION_DAYS): Promise<
 /**
  * Delete per-check rows past the retention window.
  *
- * Refuses to delete anything for a day that has no rollup. That guard is the
- * whole safety property: if the rollup job has been failing silently for a
- * fortnight, this would otherwise quietly delete the only remaining copy of
- * three months of rank history.
+ * Two guards, and both are load-bearing.
+ *
+ * 1. Refuses to delete anything for a day that has no rollup. If the rollup job
+ *    has been failing silently for a fortnight, this would otherwise quietly
+ *    delete the only remaining copy of three months of rank history.
+ *
+ * 2. Deletes whole PROPERTY-TIMEZONE DAYS, never a slice of one. This used to
+ *    cut at an instant — `checked_at < now() - 90 days` — which on the boundary
+ *    day deletes the checks before that instant and leaves the rest. Harmless
+ *    on its own; fatal in combination with the pre-prune rollup, which is
+ *    deliberately unbounded (§47) and recomputes every day from whatever checks
+ *    still exist. The next run therefore recomputed that day from the SURVIVING
+ *    half and `ON CONFLICT DO UPDATE` overwrote a correct full-day rollup with a
+ *    half-day aggregate — silently, permanently, to the archive whose entire
+ *    purpose is to outlive the per-check rows.
+ *
+ *    The day grid is the property's, matching `rollups.ts`, so "deleted" and
+ *    "rolled up" mean the same unit.
  */
 export async function pruneSerpChecks(days = CHECK_RETENTION_DAYS): Promise<number> {
   const result = await db.execute(sql`
-    DELETE FROM serp_checks
-    WHERE checked_at < now() - (${days} * interval '1 day')
+    DELETE FROM serp_checks sc
+    USING properties p
+    WHERE p.id = sc.property_id
+      AND (sc.checked_at AT TIME ZONE p.timezone)::date
+          < ((now() - (${days} * interval '1 day')) AT TIME ZONE p.timezone)::date
       AND EXISTS (
         SELECT 1 FROM daily_rank_rollups r
-        JOIN properties p ON p.id = serp_checks.property_id
-        WHERE r.keyword_target_id = serp_checks.keyword_target_id
-          AND r.day = (serp_checks.checked_at AT TIME ZONE p.timezone)::date
+        WHERE r.keyword_target_id = sc.keyword_target_id
+          AND r.day = (sc.checked_at AT TIME ZONE p.timezone)::date
       )
-    RETURNING id
+    RETURNING sc.id
   `);
   return result.rows.length;
 }

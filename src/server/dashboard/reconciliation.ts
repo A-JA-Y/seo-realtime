@@ -51,7 +51,18 @@ export interface SerpSide {
   locationName: string;
   device: 'desktop' | 'mobile';
   checkedAt: Date | null;
-  found: boolean;
+  /**
+   * `true` found, `false` checked and absent, `null` NEVER CHECKED near this
+   * date.
+   *
+   * The three states are not two. Collapsing null to false made an active
+   * target that simply has no check in the window render as a critical "not
+   * found" — i.e. the panel announced a ranking collapse whenever SERP ingest
+   * paused (balance exhausted, credentials rotated, a new target before its
+   * first pingback) while Search Console kept flowing. That is the opposite of
+   * domain rule 5's spirit: absence of evidence became evidence of absence.
+   */
+  found: boolean | null;
   /** Organic-only: "which blue link am I". */
   rankGroup: number | null;
   /** All-elements: how far down the page. This is what reconciles with GSC. */
@@ -163,7 +174,10 @@ export function explainReconciliation(gsc: GscSide, targets: readonly SerpSide[]
   for (const target of checked) {
     const where = `${target.locationName} on ${target.device}`;
 
-    if (!target.found) {
+    // `checked` already excludes never-checked targets, so `found` here is a
+    // real boolean. Explicit rather than truthiness, so a future null cannot
+    // quietly fall into the "not found" branch again.
+    if (target.found === false) {
       lines.push(
         `A check from ${where} did not find the domain in the top 100 at all. That is stored as "not found" with no position — never as position 100, which would drag every average that touches it.`,
       );
@@ -321,7 +335,7 @@ export async function getReconciliation(
       locationName: row.locationName,
       device: row.device,
       checkedAt: row.checkedAt,
-      found: row.found ?? false,
+      found: row.found,
       rankGroup,
       rankAbsolute,
       furnitureGap:
@@ -332,17 +346,31 @@ export async function getReconciliation(
     });
   }
 
-  const impressions = gscPoint?.impressions ?? null;
-
+  /*
+   * `positionImpressions`, not `impressions` — and the resolver's own verdict,
+   * not a second evaluation of domain rule 6.
+   *
+   * For an hourly aggregate the two counts differ: `impressions` is the day's
+   * total, `positionImpressions` is the impressions actually behind the
+   * average (only the hours that HAD a position). Judging confidence on the
+   * day total called a 2-impression average "normal" in this panel while the
+   * keyword table, reading the resolver, flagged the same number as noise.
+   * Rule 6 now has one definition, in the same place rule 3 lives.
+   */
   const gsc: GscSide = {
     source: 'Search Console average position',
     date,
     position: gscPoint?.position ?? null,
-    impressions,
+    impressions: gscPoint?.positionImpressions ?? null,
     clicks: gscPoint?.clicks ?? null,
     state: gscPoint?.source ?? 'none',
     isProvisional: gscPoint?.isProvisional ?? false,
-    confidence: confidenceOf(impressions),
+    confidence:
+      gscPoint === undefined || gscPoint.source === 'none'
+        ? 'none'
+        : gscPoint.isLowConfidence
+          ? 'low'
+          : 'normal',
   };
 
   const targets = [...byTarget.values()].sort((a, b) =>

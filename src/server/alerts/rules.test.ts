@@ -6,6 +6,7 @@ import {
   MIN_CHECKS_PER_DAY,
   RANK_DROP_THRESHOLD,
   RANK_GAIN_THRESHOLD,
+  RANK_MOVE_CLEAR_THRESHOLD,
   resolvedSignatures,
   signatureFor,
   TOP_N,
@@ -195,13 +196,122 @@ describe('signatures', () => {
     expect(a.map((x) => x.signature)).toEqual(b.map((x) => x.signature));
   });
 
-  it('changes when the move starts from a different place, so a second fall alerts again', () => {
-    const first = evaluate(facts({ baseline: day('2026-09-05', 5), today: day('2026-09-12', 15) }))
-      .find((x) => x.type === 'rank_drop');
-    const second = evaluate(facts({ baseline: day('2026-09-12', 15), today: day('2026-09-19', 40) }))
-      .find((x) => x.type === 'rank_drop');
+  /*
+   * The regression that cost this design its point.
+   *
+   * The move bucket used to be the position moved FROM, so that 5 → 15 and a
+   * later 15 → 40 would be two alerts. But the baseline is a SEVEN-DAY SLIDING
+   * WINDOW — it advances daily — so for any keyword that is actually trending
+   * the "from" value changes every day and the signature changed with it. A
+   * single steady climb in the demo data raised on 22 consecutive days across
+   * 18 distinct buckets.
+   */
+  it('holds ONE signature across a trend, however the sliding baseline moves', () => {
+    // A keyword sliding steadily: the baseline it is compared against moves
+    // every day, and so does the current rank.
+    const slide = [
+      [10, 20],
+      [12, 24],
+      [15, 28],
+      [18, 33],
+      [22, 40],
+    ] as const;
 
-    expect(first?.signature).not.toBe(second?.signature);
+    const signatures = slide.map(([from, to]) => {
+      const [alert] = evaluate(
+        facts({ baseline: day('2026-09-05', from), today: day('2026-09-12', to) }),
+      ).filter((a) => a.type === 'rank_drop');
+      expect(alert, `no rank_drop for ${from} -> ${to}`).toBeDefined();
+      return alert!.signature;
+    });
+
+    expect(new Set(signatures).size, 'one episode must be one signature').toBe(1);
+  });
+
+  it('a second fall alerts again only because the first episode was resolved', () => {
+    // While the drop holds, nothing clears it.
+    const falling = facts({ baseline: day('2026-09-05', 5), today: day('2026-09-12', 15) });
+    const drop = evaluate(falling).find((a) => a.type === 'rank_drop')!;
+    expect(resolvedSignatures(falling)).not.toContain(drop.signature);
+
+    // Recovered — the move no longer meets the threshold, so the episode ends
+    // and the signature is freed.
+    const recovered = facts({ baseline: day('2026-09-12', 15), today: day('2026-09-19', 16) });
+    expect(resolvedSignatures(recovered)).toContain(drop.signature);
+
+    // A later, separate fall reuses that signature, which is now free.
+    const fallsAgain = facts({ baseline: day('2026-09-19', 16), today: day('2026-09-26', 45) });
+    const second = evaluate(fallsAgain).find((a) => a.type === 'rank_drop')!;
+    expect(second.signature).toBe(drop.signature);
+    expect(resolvedSignatures(fallsAgain)).not.toContain(second.signature);
+  });
+
+  it('never resolves an episode that still holds', () => {
+    for (const [from, to] of [
+      [5, 15],
+      [10, 30],
+      [1, 99],
+    ] as const) {
+      const f = facts({ baseline: day('2026-09-05', from), today: day('2026-09-12', to) });
+      const drop = evaluate(f).find((a) => a.type === 'rank_drop')!;
+      expect(resolvedSignatures(f)).not.toContain(drop.signature);
+    }
+  });
+
+  it('a gain episode resolves when the gain stops holding, and not before', () => {
+    const rising = facts({ baseline: day('2026-09-05', 20), today: day('2026-09-12', 10) });
+    const gain = evaluate(rising).find((a) => a.type === 'rank_gain')!;
+    expect(resolvedSignatures(rising)).not.toContain(gain.signature);
+
+    const levelled = facts({ baseline: day('2026-09-12', 10), today: day('2026-09-19', 9) });
+    expect(resolvedSignatures(levelled)).toContain(gain.signature);
+  });
+
+  /*
+   * The hysteresis invariant. If these ever met, the boundary would become a
+   * hair trigger and one slow trend would alternate raise/resolve for ever —
+   * six alerts for one climb, measured on the demo data.
+   */
+  it('clears a move at a strictly lower bar than it raises one', () => {
+    expect(RANK_MOVE_CLEAR_THRESHOLD).toBeLessThan(RANK_DROP_THRESHOLD);
+    expect(RANK_MOVE_CLEAR_THRESHOLD).toBeLessThan(RANK_GAIN_THRESHOLD);
+  });
+
+  it('does not flap while a move decays through the raise threshold', () => {
+    // The real shape from the demo data: a steady climb whose gap against the
+    // sliding baseline wanders either side of 5.
+    const gaps = [5, 3, 5, 4, 5, 4, 4, 4, 5, 4, 3, 4, 3, 3, 4, 4, 4, 5, 4, 4, 6, 4];
+    let open = false;
+    let raises = 0;
+
+    for (const gap of gaps) {
+      const f = facts({ baseline: day('2026-09-05', 40), today: day('2026-09-12', 40 - gap) });
+      const raised = evaluate(f).some((a) => a.type === 'rank_gain');
+      const cleared = resolvedSignatures(f).includes(
+        signatureFor('rank_gain', TARGET, ''),
+      );
+
+      if (!open && raised) { open = true; raises++; }
+      else if (open && cleared) open = false;
+    }
+
+    // One episode, not one per threshold crossing.
+    expect(raises).toBe(1);
+    expect(open, 'a move that never decayed below the clear bar stays open').toBe(true);
+  });
+
+  it('a drop and a gain are never open at the same time', () => {
+    // Whichever holds, the other one is being cleared.
+    for (const [from, to] of [
+      [5, 20],
+      [20, 5],
+      [10, 10],
+    ] as const) {
+      const f = facts({ baseline: day('2026-09-05', from), today: day('2026-09-12', to) });
+      const raised = new Set(evaluate(f).map((a) => a.signature));
+      const cleared = new Set(resolvedSignatures(f));
+      for (const sig of raised) expect(cleared.has(sig)).toBe(false);
+    }
   });
 
   it('never collides across types or targets', () => {

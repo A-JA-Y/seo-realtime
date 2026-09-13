@@ -57,8 +57,12 @@ export async function POST(_request: Request, context: { params: Promise<{ id: s
     }
 
     if (result.status === 'failed') {
-      // `liveCheckTarget` has already reduced the provider's answer to a status
-      // line; it never carries credentials.
+      /*
+       * `liveCheckTarget` decides what is safe to say: the provider's own
+       * status line where it has one, and a constant otherwise. It does NOT
+       * hand back a caught exception — that catch spans a database write, and
+       * a driver error carries the failing SQL and its bound parameters.
+       */
       throw new ApiFailure('PROVIDER_ERROR', result.reason, 502);
     }
 

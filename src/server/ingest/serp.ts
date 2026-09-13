@@ -1,7 +1,7 @@
 import { and, eq, inArray, isNull, lt, or, sql } from 'drizzle-orm';
 
 import { env } from '@/lib/env';
-import type { Logger } from '@/lib/logger';
+import { logger as rootLogger, type Logger } from '@/lib/logger';
 import { redactError } from '@/lib/redact';
 import { db } from '@/server/db';
 import {
@@ -78,7 +78,22 @@ export interface DueTarget {
  * depend on being able to check a money keyword hourly and a long-tail one
  * twice a day.
  */
-export async function dueTargets(limit = MAX_TASKS_PER_POST): Promise<DueTarget[]> {
+export async function dueTargets(
+  limit = MAX_TASKS_PER_POST,
+  options: { now?: Date } = {},
+): Promise<DueTarget[]> {
+  /*
+   * The DATABASE's clock by default — a due-check is a claim, and comparing
+   * stored timestamps against a serverless instance's own clock invites skew
+   * between the reader and the writer.
+   *
+   * Injectable only so tests can pin it. A test that writes a fixed
+   * `last_checked_at` and then asks `now()` whether it is due is really asking
+   * the wall clock, and starts failing the day the real date drifts past the
+   * check interval — which is exactly what happened to this one.
+   */
+  const at = options.now ? sql`${options.now.toISOString()}::timestamptz` : sql`now()`;
+
   const rows = await db
     .select({
       target: keywordTargets,
@@ -98,7 +113,7 @@ export async function dueTargets(limit = MAX_TASKS_PER_POST): Promise<DueTarget[
           isNull(keywordTargets.lastCheckedAt),
           lt(
             keywordTargets.lastCheckedAt,
-            sql`now() - (${keywordTargets.checkIntervalMin} * interval '1 minute')`,
+            sql`${at} - (${keywordTargets.checkIntervalMin} * interval '1 minute')`,
           ),
         ),
         /*
@@ -115,7 +130,7 @@ export async function dueTargets(limit = MAX_TASKS_PER_POST): Promise<DueTarget[
           isNull(keywordTargets.lastEnqueuedAt),
           lt(
             keywordTargets.lastEnqueuedAt,
-            sql`now() - (${keywordTargets.checkIntervalMin} * interval '1 minute')`,
+            sql`${at} - (${keywordTargets.checkIntervalMin} * interval '1 minute')`,
           ),
         ),
       ),
@@ -577,13 +592,13 @@ export async function handleSerpPingback(
       trimmedPayload: trimSerpPayload(result),
       provider: 'dataforseo',
       providerTaskId: task.id ?? taskId,
-      costUsd: task.cost ?? null,
+      costUsd: queuedCostOf(task.cost),
       receivedAt,
       log: run.log,
     });
 
     run.addRows(1);
-    run.addCost(task.cost ?? 0);
+    run.addCost(queuedCostOf(task.cost));
     run.setMeta({
       keyword_target_id: joined.target.id,
       found: parsed.found,
@@ -623,6 +638,30 @@ function failure(run: RunHandle, reason: string): PingbackOutcome {
   run.markFailed(reason);
   run.log.error('pingback could not be processed', { reason });
   return { status: 'failed', reason };
+}
+
+/**
+ * What a delivered queued check actually cost.
+ *
+ * DataForSEO bills at `task_post` and serves results free for 30 days, so
+ * `task_get` answers `"cost": 0` — not null. `task.cost ?? COST_PER_SERP.standard`
+ * therefore does NOT work: `??` only catches null and undefined, and a provider
+ * zero sails straight through.
+ *
+ * The consequence was quiet and total: every scheduled check stored
+ * `cost_usd = 0.000000`, so `/ops` — the page whose entire job is "you are
+ * spending real money on a schedule; watch it" — reported $0.00 month to date
+ * while the account was billed for every one of them. Only the "check now"
+ * path, which reads the live endpoint's real cost, was ever non-zero.
+ *
+ * So: trust a positive number from the provider, and otherwise fall back to the
+ * list price we know we were charged at submission. Never record a zero for a
+ * check that was paid for.
+ */
+function queuedCostOf(providerCost: number | null | undefined): number {
+  return typeof providerCost === 'number' && providerCost > 0
+    ? providerCost
+    : COST_PER_SERP.standard;
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -742,6 +781,25 @@ export async function liveCheckTarget(
       costUsd: task.cost ?? COST_PER_SERP.live,
     };
   } catch (error) {
-    return { status: 'failed', reason: redactError(error) };
+    /*
+     * The detail goes to the log, NOT to the caller.
+     *
+     * This catch spans the database write as well as the provider call, so
+     * `error` can be a driver error carrying the failing SQL and its bound
+     * parameter values — keyword terms, ids, a domain. `redactError` strips
+     * credentials, connection strings and PEM blocks; it does not strip a
+     * query, and this string was being returned verbatim in the 502 body to
+     * any authenticated user, including a client-role one (acceptance
+     * criterion 12).
+     *
+     * The provider's own status lines are returned above, where they are known
+     * to be a status line and nothing else.
+     */
+    rootLogger.error('live check failed', {
+      keyword_target_id: keywordTargetId,
+      error: redactError(error),
+    });
+
+    return { status: 'failed', reason: 'The live check could not be completed.' };
   }
 }

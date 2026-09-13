@@ -67,6 +67,21 @@ export const RANK_GAIN_THRESHOLD = 5;
 export const TOP_N = 10;
 
 /**
+ * A move episode ends only once it has decayed BELOW this — deliberately lower
+ * than the threshold that raised it.
+ *
+ * Hysteresis, and it is not optional. Raising at >= 5 and clearing at < 5 makes
+ * the boundary a hair trigger: a keyword whose gap against its sliding baseline
+ * oscillates between 4 and 6 raises and resolves on alternate days for ever.
+ * Measured on the demo data, one slow steady climb from #45 to #28 flapped the
+ * 5/5 pair six times in three weeks; with a 5/3 pair it is one alert, opened
+ * when the climb started and closed when it flattened.
+ *
+ * Must stay strictly below the raise thresholds — a test pins that.
+ */
+export const RANK_MOVE_CLEAR_THRESHOLD = 3;
+
+/**
  * Neither side of a comparison may rest on a single check (§9).
  *
  * A rollup built from one check IS that check, so "baselines come from
@@ -90,11 +105,27 @@ export const MIN_CHECKS_PER_DAY = 2;
  * as the condition is the same one — and to CHANGE when it is genuinely a new
  * one.
  *
- * So the bucket is never a date. For a state (out of the top 10, gone from the
- * index) it is empty, because there is only one way to be in that state. For a
- * move it is the position moved FROM, so 5 → 15 and a later 15 → 40 are two
- * alerts while re-detecting the same 5 → 15 every day is one. For an event it
- * is the thing that happened — the new URL, the competitor's domain.
+ * So the bucket is never a date, and it is never a value that MOVES either.
+ *
+ * For a state (out of the top 10, gone from the index) it is empty, because
+ * there is only one way to be in that state. For an event it is the thing that
+ * happened — the new URL, the competitor's domain.
+ *
+ * A move is also empty, and that was a correction. The bucket used to be the
+ * position moved FROM, on the reasoning that 5 → 15 and a later 15 → 40 are two
+ * different problems. But the baseline is a SEVEN-DAY SLIDING WINDOW: it
+ * advances every day, so for any keyword that is actually trending the "from"
+ * value changes daily and the signature changes with it. Measured against the
+ * demo data, one steady climb from #34 to #6 satisfied the gain condition on 22
+ * consecutive days and took 18 distinct bucket values — 18 alerts for one
+ * event, which is precisely what this whole scheme exists to prevent.
+ *
+ * A move is therefore an EPISODE: "this keyword is currently down five or more
+ * places against its baseline". It raises once, stays open while that holds,
+ * and is resolved by `resolvedSignatures` once the move DECAYS — to under
+ * `RANK_MOVE_CLEAR_THRESHOLD`, deliberately lower than the bar that raised it,
+ * because a matched pair flaps at the boundary. A later, separate fall then
+ * raises a fresh alert, because the first one is closed.
  */
 export function signatureFor(type: AlertType, keywordTargetId: string | null, bucket: string): string {
   return createHash('sha256')
@@ -165,7 +196,7 @@ export function evaluate(facts: TargetFacts): AlertCandidate[] {
           `Best organic rank went from #${then} to #${now} over ${facts.baselineDays} days, ` +
           `${where(facts)}. Both figures are the best rank_group of that day's checks — ` +
           `not a single check, and not a Search Console average.`,
-        signature: signatureFor('rank_drop', facts.keywordTargetId, String(then)),
+        signature: signatureFor('rank_drop', facts.keywordTargetId, ''),
         payload: { day, from: then, to: now, delta, days: facts.baselineDays },
       });
     }
@@ -179,7 +210,7 @@ export function evaluate(facts: TargetFacts): AlertCandidate[] {
         body:
           `Best organic rank went from #${then} to #${now} over ${facts.baselineDays} days, ` +
           `${where(facts)}.`,
-        signature: signatureFor('rank_gain', facts.keywordTargetId, String(then)),
+        signature: signatureFor('rank_gain', facts.keywordTargetId, ''),
         payload: { day, from: then, to: now, delta, days: facts.baselineDays },
       });
     }
@@ -285,6 +316,29 @@ export function resolvedSignatures(facts: TargetFacts): string[] {
 
   if (now !== null && now > TOP_N) {
     cleared.push(signatureFor('entered_top_10', facts.keywordTargetId, ''));
+  }
+
+  /*
+   * A move episode ends when the move no longer meets its threshold — either
+   * the rank recovered, or the sliding baseline caught up with it.
+   *
+   * Without this the open row holds the signature for ever: the partial unique
+   * index makes every later occurrence a no-op insert, so a keyword that fell,
+   * recovered, and fell again a month later would show only the first alert.
+   * Resolution is what makes the suppression a suppression rather than a
+   * permanent silence.
+   */
+  const then = facts.baseline?.bestRankGroup ?? null;
+
+  if (now !== null && then !== null) {
+    const delta = now - then;
+
+    if (delta < RANK_MOVE_CLEAR_THRESHOLD) {
+      cleared.push(signatureFor('rank_drop', facts.keywordTargetId, ''));
+    }
+    if (-delta < RANK_MOVE_CLEAR_THRESHOLD) {
+      cleared.push(signatureFor('rank_gain', facts.keywordTargetId, ''));
+    }
   }
 
   return cleared;

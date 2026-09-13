@@ -628,7 +628,14 @@ describe.skipIf(!hasDb)('DataForSEO ingestion', () => {
 
       const [target] = await db.select().from(keywordTargets).where(eq(keywordTargets.id, targetId));
       expect(target!.lastCheckedAt?.toISOString()).toBe('2026-09-12T14:03:22.000Z');
-      expect((await dueTargets()).map((d) => d.target.id)).not.toContain(targetId);
+
+      // Ask the due query as of the FIXTURE's instant, not the wall clock.
+      // Without this the assertion silently expires: once the real date drifts
+      // past the check interval the target is genuinely due again and the test
+      // starts failing for a reason that has nothing to do with the code.
+      expect((await dueTargets(undefined, { now: now() })).map((d) => d.target.id)).not.toContain(
+        targetId,
+      );
     });
 
     it('stores a miss as found=false with NULL ranks, never 100', async () => {

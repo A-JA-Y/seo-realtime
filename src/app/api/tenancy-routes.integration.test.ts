@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { eq } from 'drizzle-orm';
+import { eq, inArray } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { db } from '@/server/db';
@@ -387,7 +387,20 @@ describe.skipIf(!hasDb)('cross-tenant isolation at the API layer', () => {
     });
 
     it('marks only this property\u2019s alerts read', async () => {
-      await db.update(alerts).set({ readAt: null, resolvedAt: null });
+      /*
+       * Scoped to this test's two alerts, not the whole table.
+       *
+       * An unscoped `SET resolved_at = NULL` un-resolves every alert in a
+       * shared database, and `alerts_open_signature` is a partial unique index
+       * on `signature WHERE resolved_at IS NULL` — so the moment any other data
+       * legitimately holds a resolved alert that reuses an open alert's
+       * signature (a move episode that closed and re-opened), this reset throws
+       * a constraint violation and the tenancy assertion never runs.
+       */
+      await db
+        .update(alerts)
+        .set({ readAt: null, resolvedAt: null })
+        .where(inArray(alerts.id, [ids.alertA1, ids.alertB1]));
       principal = adminA;
 
       const response = await readAllAlerts(ids.propA1);

@@ -1,6 +1,8 @@
 import { and, eq, sql } from 'drizzle-orm';
 
 import { pacificToday, shiftDate, type DateString } from '@/lib/gsc-dates';
+import { propertyToday } from '@/lib/property-dates';
+import { MIN_CHECKS_PER_DAY } from '@/server/alerts/rules';
 import type { PropertyScope } from '@/server/db/scoped';
 import { db } from '@/server/db';
 import { alerts, keywordTargets, keywords, serpChecks } from '@/server/db/schema';
@@ -70,11 +72,28 @@ export interface KeywordRow {
  * table whose Δ column disagreed with the alert engine's baseline would be
  * worse than no Δ column.
  *
+ * So BOTH sides of the delta are rollup values, and both are gated on the same
+ * minimum check count the alert engine uses. It used to subtract a rollup
+ * baseline from the LATEST SINGLE CHECK — a point against a daily minimum,
+ * which is not a comparison of like with like and flips sign whenever the day's
+ * best check is better than the moment you happen to look. The rank COLUMN is
+ * still the latest check, because that is the near-realtime promise; the Δ
+ * column is explicitly "best of today vs best of that day".
+ *
+ * The anchor is the PROPERTY's day, not the Pacific day. `daily_rank_rollups`
+ * is bucketed in the property timezone; indexing it with `pacificToday()` read
+ * one day too far back for the 12.5–13.5 hours each day that the two grids
+ * disagree — the whole Indian working morning — and rendered an "improved"
+ * arrow for keywords that had fallen. See `src/lib/property-dates.ts`.
+ *
  * A missing baseline yields a NULL delta rather than a zero. Zero means "did
  * not move", which is a claim; null means "we cannot say".
  */
 export async function keywordRows(scope: PropertyScope): Promise<KeywordRow[]> {
-  const today = pacificToday();
+  const property = await scope.property();
+  if (!property) return [];
+
+  const today = propertyToday(property.timezone);
 
   const result = await db.execute<{
     keyword_id: string;
@@ -89,6 +108,7 @@ export async function keywordRows(scope: PropertyScope): Promise<KeywordRow[]> {
     checked_at: Date | string | null;
     ranking_url: string | null;
     serp_features: SerpFeatures | null;
+    today_best: number | null;
     base_24h: number | null;
     base_7d: number | null;
     base_28d: number | null;
@@ -101,12 +121,26 @@ export async function keywordRows(scope: PropertyScope): Promise<KeywordRow[]> {
       WHERE sc.property_id = ${scope.propertyId}
       ORDER BY sc.keyword_target_id, sc.checked_at DESC
     ),
+    /*
+     * Both ends of every delta come from here, so both are the same kind of
+     * number. The checks_count floor is the alert engine's own gate (§9: never
+     * a single check) — a rollup built from one check IS that check.
+     */
     baseline AS (
       SELECT
         r.keyword_target_id,
-        MIN(r.best_rank_group) FILTER (WHERE r.day = ${shiftDate(today, -1)}::date)  AS base_24h,
-        MIN(r.best_rank_group) FILTER (WHERE r.day = ${shiftDate(today, -7)}::date)  AS base_7d,
-        MIN(r.best_rank_group) FILTER (WHERE r.day = ${shiftDate(today, -28)}::date) AS base_28d
+        MIN(r.best_rank_group) FILTER (
+          WHERE r.day = ${today}::date AND r.checks_count >= ${MIN_CHECKS_PER_DAY}
+        ) AS today_best,
+        MIN(r.best_rank_group) FILTER (
+          WHERE r.day = ${shiftDate(today, -1)}::date AND r.checks_count >= ${MIN_CHECKS_PER_DAY}
+        ) AS base_24h,
+        MIN(r.best_rank_group) FILTER (
+          WHERE r.day = ${shiftDate(today, -7)}::date AND r.checks_count >= ${MIN_CHECKS_PER_DAY}
+        ) AS base_7d,
+        MIN(r.best_rank_group) FILTER (
+          WHERE r.day = ${shiftDate(today, -28)}::date AND r.checks_count >= ${MIN_CHECKS_PER_DAY}
+        ) AS base_28d
       FROM daily_rank_rollups r
       JOIN keyword_targets kt ON kt.id = r.keyword_target_id
       WHERE kt.property_id = ${scope.propertyId}
@@ -116,7 +150,7 @@ export async function keywordRows(scope: PropertyScope): Promise<KeywordRow[]> {
       k.id AS keyword_id, k.term, k.is_primary,
       kt.id AS keyword_target_id, kt.location_name, kt.device,
       l.rank_group, l.rank_absolute, l.found, l.checked_at, l.ranking_url, l.serp_features,
-      b.base_24h, b.base_7d, b.base_28d
+      b.today_best, b.base_24h, b.base_7d, b.base_28d
     FROM keywords k
     LEFT JOIN keyword_targets kt ON kt.keyword_id = k.id AND kt.is_active
     LEFT JOIN latest l   ON l.keyword_target_id = kt.id
@@ -127,8 +161,12 @@ export async function keywordRows(scope: PropertyScope): Promise<KeywordRow[]> {
 
   const rows: KeywordRow[] = result.rows.map((row) => {
     const rankGroup = row.rank_group;
+
+    // Rollup best vs rollup best. Never the latest check against a daily
+    // minimum: that compares a point with an aggregate and flips sign whenever
+    // the day's best check beats the moment you looked.
     const delta = (baseline: number | null) =>
-      rankGroup === null || baseline === null ? null : rankGroup - baseline;
+      row.today_best === null || baseline === null ? null : row.today_best - baseline;
 
     return {
       keywordId: row.keyword_id,
@@ -157,7 +195,10 @@ export async function keywordRows(scope: PropertyScope): Promise<KeywordRow[]> {
     };
   });
 
-  return attachGscReadings(rows, today);
+  // PACIFIC, not `today` — this reads gsc_snapshots.gsc_date, the other day
+  // grid. Passing the property day here would ask Google's calendar a question
+  // in India's calendar; see src/lib/property-dates.ts.
+  return attachGscReadings(rows, pacificToday());
 }
 
 /**
@@ -169,13 +210,21 @@ export async function keywordRows(scope: PropertyScope): Promise<KeywordRow[]> {
  * definition, and the day it drifted the table and the chart would disagree
  * about the same keyword while both looked right.
  */
-async function attachGscReadings(rows: KeywordRow[], today: DateString): Promise<KeywordRow[]> {
+async function attachGscReadings(
+  rows: KeywordRow[],
+  /** A PACIFIC date. `gsc_snapshots.gsc_date` is Google's calendar, not ours. */
+  pacificDay: DateString,
+): Promise<KeywordRow[]> {
   const keywordIds = [...new Set(rows.map((r) => r.keywordId))];
   if (keywordIds.length === 0) return rows;
 
   // Google finalises at T−3/T−4, so a window shorter than this can legitimately
   // be empty for a healthy property.
-  const series = await getGscSeriesForKeywords(keywordIds, shiftDate(today, -10), today);
+  const series = await getGscSeriesForKeywords(
+    keywordIds,
+    shiftDate(pacificDay, -10),
+    pacificDay,
+  );
 
   for (const row of rows) {
     const points = series.get(row.keywordId) ?? [];
@@ -236,7 +285,13 @@ export interface Overview {
  */
 export async function overview(scope: PropertyScope): Promise<Overview> {
   const rows = await keywordRows(scope);
-  const today = pacificToday();
+
+  const property = await scope.property();
+  if (!property) return { rows, tiles: [] };
+
+  // The PROPERTY's day, because the sparkline reads rollups. Pacific dates
+  // belong to gsc_snapshots and nothing else — see src/lib/property-dates.ts.
+  const today = propertyToday(property.timezone);
 
   const spark = await rankSparkline(scope, today);
 
@@ -298,7 +353,18 @@ export async function overview(scope: PropertyScope): Promise<Overview> {
   };
 }
 
-/** Seven days of average primary rank, for the tile sparkline. */
+/**
+ * Seven days of average primary rank, for the tile sparkline.
+ *
+ * `today` is a PROPERTY-timezone day. When this window was computed in Pacific
+ * time it ended one day short of the property's today for half of every day, so
+ * the tile's headline number — computed from live checks — sat above a
+ * sparkline that did not include it, and the two disagreed on screen.
+ *
+ * The is_active filters match `keywordRows`: without them the sparkline
+ * averages a different population from the tile above it, and deactivating a
+ * keyword reads as a movement.
+ */
 async function rankSparkline(
   scope: PropertyScope,
   today: DateString,
@@ -309,8 +375,8 @@ async function rankSparkline(
     SELECT to_char(r.day, 'YYYY-MM-DD') AS day,
            ROUND(AVG(r.best_rank_group)::numeric, 2)::text AS avg
     FROM daily_rank_rollups r
-    JOIN keyword_targets kt ON kt.id = r.keyword_target_id
-    JOIN keywords k ON k.id = kt.keyword_id AND k.is_primary
+    JOIN keyword_targets kt ON kt.id = r.keyword_target_id AND kt.is_active
+    JOIN keywords k ON k.id = kt.keyword_id AND k.is_primary AND k.is_active
     WHERE kt.property_id = ${scope.propertyId}
       AND r.day BETWEEN ${from}::date AND ${today}::date
     GROUP BY r.day
