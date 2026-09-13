@@ -7,9 +7,12 @@ import { alerts } from '@/server/db/schema';
 import { withIngestRun } from '@/server/ingest/runs';
 import {
   evaluate,
+  evaluateIngest,
+  resolvedIngestSignatures,
   resolvedSignatures,
   type AlertCandidate,
   type DayFacts,
+  type IngestFacts,
   type TargetFacts,
 } from './rules';
 
@@ -89,6 +92,19 @@ export async function runAlertsForProperty(
         clearable.push(...resolvedSignatures(target));
       }
 
+      /*
+       * The property-level arm. Everything above needs rollups to exist; this
+       * one fires precisely when they have STOPPED existing, so it must not be
+       * gated on the same facts — a property whose ingest died has no fresh
+       * rollups to evaluate, which is exactly when the per-target loop above
+       * goes quiet and says nothing.
+       */
+      const ingest = await ingestFacts(propertyId);
+      if (ingest) {
+        candidates.push(...evaluateIngest(ingest, day));
+        clearable.push(...resolvedIngestSignatures(ingest));
+      }
+
       const resolved = await resolveCleared(propertyId, clearable, day);
       const { raised, suppressed } = await raise(candidates);
 
@@ -115,6 +131,41 @@ export async function runAlertsForProperty(
   );
 
   return outcome.result;
+}
+
+/**
+ * How long this property has been silent on each source.
+ *
+ * Null means nothing has ever arrived, which the rule treats as "not yet
+ * started" rather than "died" — see `evaluateIngest`.
+ */
+async function ingestFacts(propertyId: string): Promise<IngestFacts | null> {
+  const result = await db.execute<{
+    name: string;
+    gsc_hours: string | null;
+    serp_hours: string | null;
+  }>(sql`
+    SELECT
+      p.name,
+      EXTRACT(EPOCH FROM (now() - (
+        SELECT max(g.fetched_at) FROM gsc_snapshots g WHERE g.property_id = p.id
+      ))) / 3600 AS gsc_hours,
+      EXTRACT(EPOCH FROM (now() - (
+        SELECT max(s.checked_at) FROM serp_checks s WHERE s.property_id = p.id
+      ))) / 3600 AS serp_hours
+    FROM properties p
+    WHERE p.id = ${propertyId} AND p.is_active
+  `);
+
+  const row = result.rows[0];
+  if (!row) return null;
+
+  return {
+    propertyId,
+    propertyName: row.name,
+    hoursSinceGscRow: row.gsc_hours === null ? null : Number(row.gsc_hours),
+    hoursSinceSerpCheck: row.serp_hours === null ? null : Number(row.serp_hours),
+  };
 }
 
 /**

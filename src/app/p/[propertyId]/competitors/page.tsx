@@ -2,7 +2,7 @@ import { Badge } from '@/components/ui/badge';
 import { Card, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Table, TableWrap, Td, Th } from '@/components/ui/table';
 import { SourceTag } from '@/components/dashboard/source-tag';
-import { relativeTime } from '@/lib/format';
+import { formatPosition, relativeTime } from '@/lib/format';
 import { pageScope } from '@/server/dashboard/page-scope';
 import { competitors } from '@/server/dashboard/queries';
 
@@ -55,8 +55,14 @@ export default async function CompetitorsPage({
                   <tr key={row.domain} className="hover:bg-muted/40">
                     <Td className="font-medium">{row.domain}</Td>
                     <Td className="text-right tabular-nums">{row.appearances}</Td>
-                    <Td className="text-right tabular-nums">#{row.bestRank}</Td>
-                    <Td className="text-right tabular-nums">{row.averageRank.toFixed(1)}</Td>
+                    {/* An em dash, never a zero — domain rule 5 applies to
+                        competitors' ranks as much as to our own. */}
+                    <Td className="text-right tabular-nums">
+                      {row.bestRank === null ? '—' : `#${row.bestRank}`}
+                    </Td>
+                    <Td className="text-right tabular-nums">
+                      {formatPosition(row.averageRank)}
+                    </Td>
                     <Td>
                       {row.outranksUsOn.length === 0 ? (
                         <span className="text-muted-foreground text-xs">—</span>

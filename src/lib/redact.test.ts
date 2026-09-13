@@ -69,3 +69,39 @@ describe('redactError', () => {
     expect(redactError(new Error('x'.repeat(5000))).length).toBe(2000);
   });
 });
+
+describe('secret keys with a prefix', () => {
+  /*
+   * The regression. The pattern was anchored with `\b`, which requires a
+   * NON-WORD character before the keyword — and `_` is a word character. So
+   * every underscore-prefixed spelling, which is to say almost every real one,
+   * sailed through unredacted. Only a bare `token=` was ever caught.
+   */
+  it.each([
+    ['access_token=abc123', 'access_token=***'],
+    ['client_secret=shhh', 'client_secret=***'],
+    ['CRON_SECRET=hunter2hunter2', 'CRON_SECRET=***'],
+    ['DATAFORSEO_PINGBACK_SECRET=deadbeef', 'DATAFORSEO_PINGBACK_SECRET=***'],
+    ['x-api-key: sk-live-9999', 'x-api-key: ***'],
+    ['my.api_key = topsecret', 'my.api_key = ***'],
+    ['{"refresh_token":"zzz"}', '{"refresh_token":"***"}'],
+    ['token=abc123', 'token=***'],
+  ])('redacts %s', (input, expected) => {
+    expect(redact(input)).toBe(expected);
+  });
+
+  // The other half: a pattern loose enough to catch those must not start
+  // eating ordinary log fields.
+  it.each(['tokens: 5 processed', 'broken: true', 'rows_written: 42', 'keyword: sofa'])(
+    'leaves %s alone',
+    (input) => {
+      expect(redact(input)).toBe(input);
+    },
+  );
+
+  it('redacts a real cron URL without destroying the rest of it', () => {
+    expect(redact('POST https://app.example.com/api/cron/daily?secret=abcdef123&job=rollup')).toBe(
+      'POST https://app.example.com/api/cron/daily?secret=***&job=rollup',
+    );
+  });
+});

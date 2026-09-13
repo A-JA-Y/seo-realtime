@@ -1068,3 +1068,192 @@ whichever is hidden. Filtering to `visible: true` fixes the selector; for a
 setup hook the better answer is to read the href and navigate, because the
 anchor is not what the test is about and the click was the flakiest step in the
 suite.
+
+---
+
+## Post-M8 — what a 14-dimension adversarial audit found
+
+183 agents: 14 finders, three independent skeptics per finding, a completeness
+critic. 56 candidates, **33 confirmed, 23 refuted**. The refutations mattered as
+much as the findings — six things that looked like serious defects were not, and
+are recorded at the end so nobody re-reports them.
+
+### 76. The two day grids, a third time
+
+§56 established that a Pacific day and a property day are different grids and
+that the CHART must not conflate them. The dashboard QUERIES then did exactly
+that: `keywordRows` and `rankSparkline` computed their rollup baselines with
+`pacificToday()`, and `daily_rank_rollups.day` is bucketed in the property's
+timezone.
+
+For the 12.5–13.5 hours a day the grids disagree — the entire Indian working
+morning, which is when this dashboard is read — every Δ indexed one rollup day
+too far back. Reproduced at 12:09 IST against the demo database: latest check
+#5, the property's real yesterday-best #4, so the keyword had got WORSE by one;
+the table rendered a green "↑ improved by 1".
+
+Three independent finders reached this from different dimensions (dates,
+sentinels, dashboard-sql) and all nine verifiers confirmed it at `high`.
+
+The lesson is that a comment is not a mechanism. §56 wrote the rule down and the
+next author — the same author — broke it four files away. There is now a
+`src/lib/property-dates.ts` whose only export is `propertyToday()`, deliberately
+NOT in `gsc-dates.ts`, so using the wrong grid requires importing from the wrong
+module.
+
+### 77. The Δ column compared a point against an aggregate
+
+Separately, and in the same expression: the delta was `latest single check −
+MIN(best_rank_group) of the baseline day`. A live instant against a daily
+minimum. Whenever the day's best check was better than the moment you looked, it
+reported an improvement that had not happened.
+
+The function's own doc comment said a Δ column disagreeing with the alert
+engine's baseline "would be worse than no Δ column" — and then it disagreed.
+Both ends are rollup values now, gated on the alert engine's own minimum check
+count. The rank column is still the live check, because that is the product; the
+Δ column is explicitly best-of-today against best-of-that-day.
+
+Consequence worth knowing: on a young day, before a target's second check, every
+Δ is null. That is honest and matches the engine, which also declines to judge
+a one-check day.
+
+### 78. `??` does not catch a provider zero
+
+DataForSEO bills at `task_post` and serves results free for thirty days, so
+`task_get` answers `"cost": 0`. Not null — zero. `task.cost ?? null` therefore
+stored `0.000000` on every scheduled check, and `/ops` — the page whose entire
+job is "you are spending real money on a schedule; watch it" — reported **$0.00
+month to date** while the account was billed for all of it.
+
+The live "check now" path had a fallback (`task.cost ?? COST_PER_SERP.live`) and
+was always right, which is why the bug was invisible: the only non-zero number
+on the page came from the one path that is used by hand.
+
+The repo could not catch it either. The integration test asserts 0.0006 is
+stored, but the fixture it feeds to `task_get` is a LIVE response carrying a real
+cost. The repository's only genuine `task_get` fixture, `task-get-error.json`,
+has `"cost": 0` — the accurate shape was already in the tree.
+
+### 79. A half-deleted day silently corrupted the archive
+
+`pruneSerpChecks` cut at an instant: `checked_at < now() - 90 days`. On the
+boundary day that deletes the checks before that instant and keeps the rest.
+
+Harmless alone. Fatal in combination with the pre-prune rollup, which is
+deliberately unbounded (§47) and recomputes every day from whatever checks still
+exist: the next run recomputed that day from the surviving half and
+`ON CONFLICT DO UPDATE` overwrote a correct full-day rollup with a partial-day
+aggregate. Permanently, and to the archive whose entire purpose is to outlive the
+per-check rows.
+
+Two individually-correct decisions — "cut at an instant" and "roll up
+unboundedly" — combining into data loss. Deletion is now aligned to the same
+property-timezone day the rollup uses, so a day is deleted whole or not at all.
+
+### 80. "Check now" returned the failing SQL to the client
+
+Its catch block spans the database write as well as the provider call, so a
+driver error — carrying the failing statement and its bound parameter values —
+was returned verbatim in the 502 body to any authenticated user, including a
+client-role one. Acceptance criterion 12.
+
+`redactError` strips credentials, connection strings and PEM blocks. It does not
+strip a query, and the route's own comment asserted a guarantee the function
+never made: "it never carries credentials". The provider's status lines are
+returned where they are known to BE status lines; everything else is logged and
+the caller gets a constant.
+
+### 81. Absence of evidence rendered as evidence of absence
+
+The reconciliation panel showed a critical "not found" badge for targets that
+had simply never been checked near the date. `getReconciliation` LEFT JOINs
+`serp_checks`, and `found: row.found ?? false` collapsed three states into two.
+
+So whenever SERP ingest paused while Search Console kept flowing — balance
+exhausted, credentials rotated, a new target before its first pingback, all
+cases the runbook has sections for — the panel told the client their keyword had
+vanished from Google. `SerpSide.found` is `boolean | null` now.
+
+### 82. `\b` does not do what it looks like it does before an underscore
+
+`redact()`'s secret-pair pattern was anchored with `\b`, which requires a
+NON-WORD character before the keyword. `_` is a word character. So
+`access_token=`, `client_secret=` and `CRON_SECRET=` — the most common real
+spellings of the thing the pattern exists to catch — all failed to match. Only a
+bare `token=` was ever redacted.
+
+Tested by running the function rather than by reading the regex, which is the
+only way this class of bug is ever found.
+
+### 83. The alert type that nothing produced
+
+`ingest_failure` was in the schema enum and labelled in the alerts UI, and no
+code path anywhere created one. The single failure mode the system is least able
+to notice — a job that stops running raises no error, it produces an absence —
+was the one with no alert.
+
+Now raised per property, per source, when data that once flowed has stopped:
+36 hours for Search Console, 24 for live checks. Deliberately requires that data
+once flowed, because a property added an hour ago has no rows and is not broken;
+that case is `/ops`'s "never produced a row", which is where the runbook already
+sends you.
+
+### 84. Two tests that had quietly stopped testing
+
+**A test that expired.** `dueTargets` compares against the DATABASE clock while
+the test pinned `last_checked_at` to a fixed 2026-09-12. It passed for as long as
+the real clock stayed within the check interval of that date, and was already
+failing on HEAD by the time the audit ran. The instant is injectable now.
+
+**A mock armed after the call.** The cron dispatcher's only `durationMs`
+assertion set its mock on the line AFTER the request, so the request ran against
+the default mock, took the crash path, and asserted a field present on both
+shapes. The success path it was named for had never executed.
+
+### 85. Refuted — do not re-report these
+
+Six findings that looked serious and were not. Each was killed by a skeptic that
+went and checked:
+
+- **`/ops` is not organisation-scoped.** True, and unreachable: nothing in the
+  product can create a second organisation. No signup, no org-creation route, no
+  admin UI; the only insert is the seed's single fixed row. Latent, not live.
+- **Role and org are never re-read after sign-in.** That is the specified
+  design (requirements.md §462-463) and §51 already records the one place this
+  build deliberately deviated from it. A documented decision, not a defect.
+- **Move alerts are never auto-resolved.** The mechanism was real and is now
+  fixed for a different reason (§86 below), but the claimed consequence — that a
+  later larger collapse would be silenced — does not hold.
+- **The engine only evaluates the in-progress day, silencing the property.** The
+  alerts job runs HOURLY, not daily, so the in-progress day is re-judged every
+  hour from the moment a target's second check lands. (I had repeated this one
+  to the user as a correction of my own M7 reasoning. The refutation is right and
+  my original reading was right: the gate fires on thin days and the hourly
+  cadence covers the rest.)
+- **`lost_top_10` is resolved off the day's BEST rank, so it flaps.** Raise and
+  resolve read the same metric and are exact complements. "Best rank_group wins"
+  is domain rule 8, not an asymmetry.
+- **Deactivating a keyword strands its alerts.** No route, mutation or UI
+  control deactivates anything; it takes a DBA running UPDATE by hand.
+
+### 86. Hysteresis: the fix that needed a second fix
+
+`rank_drop`/`rank_gain` bucketed their signature on the position moved FROM, so
+that 5 → 15 and a later 15 → 40 would be two alerts. But the baseline is a
+SEVEN-DAY SLIDING window — it advances daily — so for any trending keyword the
+"from" value changes every day and the signature changed with it. One steady
+climb in the demo data raised on **22 consecutive days across 18 buckets**.
+
+Making the move an episode (bucket `''`, resolved when it stops holding) cut
+that to six. Six, not one, because a matched raise/clear pair at the same
+threshold flaps: the gap oscillated between 3 and 6 around a threshold of 5 and
+the episode opened and closed on alternate days.
+
+Clearing at a strictly lower bar than raising — `RANK_MOVE_CLEAR_THRESHOLD = 3`
+against a raise at 5 — makes it one alert, opened when the climb started and
+closed when it flattened. Walking the engine forward 22 days over the demo data:
+22 alerts for one target became 2 at worst.
+
+The general lesson: any threshold that both opens and closes a state needs two
+thresholds, or it will chatter at exactly the value that matters most.

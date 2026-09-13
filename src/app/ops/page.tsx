@@ -46,7 +46,7 @@ export default async function OpsPage() {
   }
 
   const [runs, spend, health] = await Promise.all([
-    recentIngestRuns(50),
+    recentIngestRuns(),
     monthToDateSpend(),
     ingestHealth(),
   ]);
@@ -153,7 +153,7 @@ export default async function OpsPage() {
       {/* ── Runs ─────────────────────────────────────────────────────────── */}
       <section>
         <h2 className="mb-3 text-sm font-semibold">
-          Last {runs.length} ingest runs
+          Last {runs.length} ingest runs, most recent per job
           {failures.length > 0 && (
             <span className="text-muted-foreground ml-2 font-normal">
               — {failures.length} not fully successful

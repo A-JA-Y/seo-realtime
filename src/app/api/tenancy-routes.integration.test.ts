@@ -44,6 +44,9 @@ describe.skipIf(!hasDb)('cross-tenant isolation at the API layer', () => {
     propB1: '',
     kwA1: '',
     kwB1: '',
+    targetA1: '',
+    targetA2: '',
+    targetB1: '',
     alertA1: '',
     alertB1: '',
   };
@@ -108,13 +111,47 @@ describe.skipIf(!hasDb)('cross-tenant isolation at the API layer', () => {
       .returning();
     ids.kwB1 = kwB!.id;
 
-    await db.insert(keywordTargets).values({
-      keywordId: ids.kwA1,
-      propertyId: ids.propA1,
-      locationCode: 2356,
-      locationName: 'India',
-      device: 'desktop',
-    });
+    const [targetA] = await db
+      .insert(keywordTargets)
+      .values({
+        keywordId: ids.kwA1,
+        propertyId: ids.propA1,
+        locationCode: 2356,
+        locationName: 'India',
+        device: 'desktop',
+      })
+      .returning();
+    ids.targetA1 = targetA!.id;
+
+    // A keyword in an UNGRANTED property of the same organisation, so the
+    // client-role refusal is about the grant and not about the org.
+    const [kwA2] = await db
+      .insert(keywords)
+      .values({ propertyId: ids.propA2, term: 'route alpha two keyword' })
+      .returning();
+    const [targetA2] = await db
+      .insert(keywordTargets)
+      .values({
+        keywordId: kwA2!.id,
+        propertyId: ids.propA2,
+        locationCode: 2356,
+        locationName: 'India',
+        device: 'desktop',
+      })
+      .returning();
+    ids.targetA2 = targetA2!.id;
+
+    const [targetB] = await db
+      .insert(keywordTargets)
+      .values({
+        keywordId: ids.kwB1,
+        propertyId: ids.propB1,
+        locationCode: 2356,
+        locationName: 'India',
+        device: 'desktop',
+      })
+      .returning();
+    ids.targetB1 = targetB!.id;
 
     const [alertA] = await db
       .insert(alerts)
@@ -304,6 +341,66 @@ describe.skipIf(!hasDb)('cross-tenant isolation at the API layer', () => {
       ]);
 
       for (const response of responses) {
+        const text = JSON.stringify(await response.json());
+        expect(text).not.toContain('route bravo');
+        expect(text).not.toContain(ids.propB1);
+        expect(text).not.toContain(ids.orgB);
+      }
+    });
+  });
+
+  const checkNow = async (targetId: string) => {
+    const { POST } = await import('./keyword-targets/[id]/check/route');
+    return POST(
+      new Request(`https://x.test/api/keyword-targets/${targetId}/check`, { method: 'POST' }),
+      { params: Promise.resolve({ id: targetId }) },
+    );
+  };
+
+  /* ── The paid endpoint ────────────────────────────────────────────────── */
+
+  /*
+   * The only route in the product that spends money, and it had no test of any
+   * kind — not here, not anywhere. Every case below stops SHORT of the provider
+   * call: what matters is that nothing reaches it without passing tenancy
+   * first, because a target id is a uuid in a URL and paying to check a
+   * stranger's keyword is both a leak and a bill.
+   */
+  describe('POST /api/keyword-targets/:id/check', () => {
+    it('401s an anonymous request, before any provider call', async () => {
+      expect((await checkNow(ids.targetA1)).status).toBe(401);
+    });
+
+    it("403s a target in ANOTHER ORGANISATION", async () => {
+      principal = adminA;
+      expect((await checkNow(ids.targetB1)).status).toBe(403);
+    });
+
+    it('403s a client for an UNGRANTED property of their own organisation', async () => {
+      principal = clientA;
+      expect((await checkNow(ids.targetA2)).status).toBe(403);
+    });
+
+    it('403s — not 404 — for a target that does not exist', async () => {
+      principal = adminA;
+      const response = await checkNow(randomUUID());
+
+      expect(response.status).toBe(403);
+      expect((await response.json()).error.code).toBe('FORBIDDEN');
+    });
+
+    it('400s a malformed id rather than reaching the database', async () => {
+      principal = adminA;
+      const response = await checkNow('not-a-uuid');
+
+      expect(response.status).toBe(400);
+      expect((await response.json()).error.code).toBe('INVALID_INPUT');
+    });
+
+    it('leaks nothing about the other tenant in any refusal', async () => {
+      principal = clientA;
+
+      for (const response of [await checkNow(ids.targetB1), await checkNow(randomUUID())]) {
         const text = JSON.stringify(await response.json());
         expect(text).not.toContain('route bravo');
         expect(text).not.toContain(ids.propB1);

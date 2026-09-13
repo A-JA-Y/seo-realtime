@@ -7,6 +7,10 @@ import {
   RANK_DROP_THRESHOLD,
   RANK_GAIN_THRESHOLD,
   RANK_MOVE_CLEAR_THRESHOLD,
+  evaluateIngest,
+  resolvedIngestSignatures,
+  GSC_SILENCE_HOURS,
+  type IngestFacts,
   resolvedSignatures,
   signatureFor,
   TOP_N,
@@ -368,5 +372,88 @@ describe('every candidate', () => {
       expect(alert.body).toContain('Noida, Uttar Pradesh, India');
       expect(alert.body).toContain('mobile');
     }
+  });
+});
+
+describe('ingest failure', () => {
+  const ingest = (over: Partial<IngestFacts> = {}): IngestFacts => ({
+    propertyId: 'property-1',
+    propertyName: 'Prestige Noida',
+    hoursSinceGscRow: 1,
+    hoursSinceSerpCheck: 1,
+    ...over,
+  });
+
+  it('raises nothing while both sources are flowing', () => {
+    expect(evaluateIngest(ingest(), '2026-09-12')).toEqual([]);
+  });
+
+  /*
+   * The failure mode the whole system is least able to notice. A job that stops
+   * running raises no error — it produces an absence, and this type existed in
+   * the schema and the UI with nothing producing it.
+   */
+  it('raises when Search Console has gone silent', () => {
+    const [alert] = evaluateIngest(
+      ingest({ hoursSinceGscRow: GSC_SILENCE_HOURS + 1 }),
+      '2026-09-12',
+    );
+
+    expect(alert?.type).toBe('ingest_failure');
+    expect(alert?.severity).toBe('critical');
+    expect(alert?.keywordId).toBeNull();
+    expect(alert?.keywordTargetId).toBeNull();
+    expect(alert?.title).toContain('Prestige Noida');
+  });
+
+  it('raises separately for each source, because they fail for different reasons', () => {
+    const alerts = evaluateIngest(
+      ingest({ hoursSinceGscRow: 100, hoursSinceSerpCheck: 100 }),
+      '2026-09-12',
+    );
+
+    expect(alerts).toHaveLength(2);
+    expect(new Set(alerts.map((a) => a.signature)).size).toBe(2);
+  });
+
+  it('never confuses two properties', () => {
+    const a = evaluateIngest(ingest({ hoursSinceGscRow: 100 }), '2026-09-12')[0]!;
+    const b = evaluateIngest(
+      ingest({ propertyId: 'property-2', hoursSinceGscRow: 100 }),
+      '2026-09-12',
+    )[0]!;
+
+    expect(a.signature).not.toBe(b.signature);
+  });
+
+  /*
+   * Death, not birth. A property added an hour ago has no rows and is not
+   * broken; alerting on it would fire on every onboarding.
+   */
+  it('says nothing about a property that has never ingested anything', () => {
+    expect(
+      evaluateIngest(ingest({ hoursSinceGscRow: null, hoursSinceSerpCheck: null }), '2026-09-12'),
+    ).toEqual([]);
+  });
+
+  it('clears as soon as data flows again', () => {
+    const silent = ingest({ hoursSinceGscRow: 100 });
+    const alert = evaluateIngest(silent, '2026-09-12')[0]!;
+
+    expect(resolvedIngestSignatures(silent)).not.toContain(alert.signature);
+    expect(resolvedIngestSignatures(ingest({ hoursSinceGscRow: 1 }))).toContain(alert.signature);
+  });
+
+  it('does not clear a source that has never produced anything', () => {
+    // Null is "not started", not "healthy" — resolving on it would close a real
+    // alert for a property whose rows were deleted.
+    expect(resolvedIngestSignatures(ingest({ hoursSinceGscRow: null }))).not.toContain(
+      evaluateIngest(ingest({ hoursSinceGscRow: 100 }), '2026-09-12')[0]!.signature,
+    );
+  });
+
+  it('records the day, so an older re-run cannot resolve it', () => {
+    const [alert] = evaluateIngest(ingest({ hoursSinceGscRow: 100 }), '2026-09-12');
+    expect(alert?.payload.day).toBe('2026-09-12');
   });
 });

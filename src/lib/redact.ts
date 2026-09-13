@@ -21,8 +21,18 @@ const PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
   [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, '[REDACTED PEM]'],
   // Authorization headers, however they were serialised.
   [/\b(Authorization"?\s*[:=]\s*"?)(Basic|Bearer)\s+[A-Za-z0-9+/=._-]+/gi, '$1$2 ***'],
-  // `secret=`, `token=`, `password=`, `key=` query params and JSON fields.
-  [/\b((?:api[_-]?key|secret|token|password|passwd|pwd)"?\s*[:=]\s*"?)[^\s"&,}]+/gi, '$1***'],
+  /*
+   * `secret=`, `token=`, `password=`, `key=` query params and JSON fields.
+   *
+   * The leading `[A-Za-z0-9_.-]*` replaced a `\b`, which does not do what it
+   * looks like it does here. `\b` needs a non-word character before the
+   * keyword, and `_` IS a word character — so `access_token=`, `client_secret=`
+   * and `CRON_SECRET=` all failed to match, which is to say the most common
+   * real-world spellings of the thing this pattern exists to catch. Only a
+   * bare `token=` was ever redacted.
+   */
+  [/([A-Za-z0-9_.-]*(?:api[_-]?key|secret|token|password|passwd|pwd)"?\s*[:=]\s*"?)[^\s"&,}]+/gi,
+    '$1***'],
 ];
 
 /**

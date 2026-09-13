@@ -49,6 +49,29 @@ UI is labelled with its source.
 Pacific-time date handling (`src/lib/gsc-dates.ts`) landed early — the setup
 checker needs it, and it encodes domain rule 4.
 
+### After M8: an adversarial audit
+
+M6-M8 were reviewed the way M2 and M3 were: 14 finders, three independent
+skeptics per finding, a completeness critic. **56 candidates, 33 confirmed, 23
+refuted.** All 33 are fixed; the refutations are recorded in NOTES §85 so nobody
+re-reports them.
+
+The six that mattered most, and what they have in common:
+
+| What                                                                                                | Why it survived until now                                                                                                  |
+| --------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| Dashboard Δ columns indexed **property-timezone** rollups with a **Pacific** date                   | The grids agree for half of every day, so it looked right whenever anyone checked after lunch                              |
+| The Δ subtracted a **daily minimum** from a **single live check**                                   | Both numbers are ranks; nothing about the types said they were not comparable                                              |
+| Every scheduled check recorded **`cost_usd = 0`**                                                   | `task_get` returns `cost: 0`, not null, and `??` does not catch a zero — so `/ops` read $0.00 while the account was billed |
+| Pruning cut at an **instant**, then the unbounded rollup overwrote that day from the surviving half | Two individually correct decisions; only their combination destroys data                                                   |
+| "Check now" returned a **driver error, with the failing SQL**, to the client                        | `redactError` strips credentials, and the call site's comment claimed it stripped more                                     |
+| One trend raised **22 daily alerts**                                                                | The signature bucketed on a baseline that slides                                                                           |
+
+Five of the six are cases where the code did what its author meant and the
+comment above it asserted something slightly stronger than the code delivered.
+That is the failure mode to watch for in this repository specifically: it is
+heavily commented, and a confident comment reads as a guarantee.
+
 ### Picking this up
 
 Everything below is the state of play for whoever continues, written so you do
@@ -75,7 +98,10 @@ not have to reconstruct it from the diff.
   gaps, zero-impression days, an open not-found stretch, a furniture-gap
   divergence, a ranking-URL change and two locations that disagree, because
   every one of those is a rendering path that is otherwise never exercised.
-  `pnpm db:demo --clear` removes it.
+  It also walks the alert engine forward across the window, so the feed is
+  populated — a demo with an empty alerts page is not a demo, and its
+  end-to-end tests skip themselves when there is nothing to act on.
+  `pnpm db:demo --clear` removes all of it, derived rows included.
 
 **Two decisions worth not re-litigating.**
 
@@ -380,19 +406,26 @@ Each has a test.
 ## Deployment
 
 Vercel, Hobby-compatible. `vercel.json` registers one daily cron
-(`/api/cron/daily`, which chains reconcile → rollup → prune). The hourly jobs
-come from `.github/workflows/ingest.yml`, which hits the same dispatcher with a
-Bearer header — see `requirements.md` §9 for the alternatives.
+(`/api/cron/daily`, which chains reconcile → rollup → prune → alerts). The
+hourly jobs come from `.github/workflows/ingest.yml`, which hits the same
+dispatcher with a Bearer header — see `requirements.md` §9 for the
+alternatives.
 
 Set `APP_BASE_URL` and `CRON_SECRET` as GitHub Actions **secrets** for that
 workflow to work.
 
-| Job                                  | Driven by      | Schedule                           |
-| ------------------------------------ | -------------- | ---------------------------------- |
-| `ingest-gsc`                         | GitHub Actions | hourly at :05                      |
-| `enqueue-serp`                       | GitHub Actions | hourly at :05                      |
-| `backfill-gsc`                       | GitHub Actions | hourly at :05, no-op once complete |
-| `daily` (reconcile → rollup → prune) | Vercel cron    | 04:00 UTC                          |
+| Job                                           | Driven by      | Schedule                           |
+| --------------------------------------------- | -------------- | ---------------------------------- |
+| `ingest-gsc`                                  | GitHub Actions | hourly at :05                      |
+| `enqueue-serp`                                | GitHub Actions | hourly at :05                      |
+| `backfill-gsc`                                | GitHub Actions | hourly at :05, no-op once complete |
+| `rollup` then `alerts`                        | GitHub Actions | hourly at :05, **in that order**   |
+| `daily` (reconcile → rollup → prune → alerts) | Vercel cron    | 04:00 UTC                          |
+
+The order of the last two is load-bearing, not cosmetic. Alert baselines come
+from `daily_rank_rollups` (§9), so an engine that ran before the rollup would
+evaluate today against a rollup that does not exist yet and quietly find
+nothing — a silent alerting system, which is the failure mode nobody notices.
 
 Every job is individually addressable, safe to run twice, and processes
 properties independently.

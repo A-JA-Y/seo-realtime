@@ -227,6 +227,127 @@ describe.skipIf(!hasDb)('alert engine', () => {
     expect(BASELINE_DAYS).toBe(7);
   });
 
+  /*
+   * The two event signals — the ranking-URL swap and the new top-3 competitor —
+   * are the only parts of the engine that read `serp_checks` rather than the
+   * rollups, and they were exercised by nothing. Deleting either query would
+   * have left the suite green.
+   */
+  describe('event signals, which read checks rather than rollups', () => {
+    async function check(at: string, rankingUrl: string | null, competitors: string[]) {
+      await db.insert(serpChecks).values({
+        keywordTargetId: targetId,
+        propertyId,
+        keywordId,
+        checkedAt: new Date(at),
+        found: rankingUrl !== null,
+        rankGroup: rankingUrl === null ? null : 5,
+        rankAbsolute: rankingUrl === null ? null : 8,
+        rankingUrl,
+        competingDomains: competitors.map((domain, i) => ({
+          rank_group: i + 1,
+          domain,
+          url: `https://${domain}/x`,
+          title: domain,
+        })),
+        costUsd: '0.000600',
+      });
+    }
+
+    // The engine buckets checks by the PROPERTY timezone (Asia/Kolkata here),
+    // so these instants are chosen to land on the intended local days.
+    const onBaselineDay = '2026-09-05T06:00:00Z';
+    const onToday = '2026-09-12T06:00:00Z';
+
+    it('raises when Google swaps which of your pages ranks', async () => {
+      await rollup(BASELINE, 5);
+      await rollup(TODAY, 5);
+      await check(onBaselineDay, 'https://example.com/old', ['a.com']);
+      await check(onToday, 'https://example.com/new', ['a.com']);
+
+      await runAlertsForProperty(propertyId, { day: TODAY });
+      const rows = await openAlerts();
+
+      const swap = rows.find((r) => r.type === 'ranking_url_changed');
+      expect(swap, 'a URL swap at an unchanged position must still alert').toBeDefined();
+      expect(swap?.body).toContain('/old');
+      expect(swap?.body).toContain('/new');
+    });
+
+    it('does not raise a URL change when the page is the same', async () => {
+      await rollup(BASELINE, 5);
+      await rollup(TODAY, 5);
+      await check(onBaselineDay, 'https://example.com/same', ['a.com']);
+      await check(onToday, 'https://example.com/same', ['a.com']);
+
+      await runAlertsForProperty(propertyId, { day: TODAY });
+      expect((await openAlerts()).some((r) => r.type === 'ranking_url_changed')).toBe(false);
+    });
+
+    /*
+     * Domain rule 7's sibling case: dropping out and coming back on the same
+     * page is not a URL swap. A not-found check has no ranking URL, and
+     * treating that as a change reports a different event with a different
+     * cause.
+     */
+    it('does not report dropping out and returning as a URL change', async () => {
+      await rollup(BASELINE, 5);
+      await rollup(TODAY, 5);
+      await check(onBaselineDay, 'https://example.com/same', ['a.com']);
+      await check('2026-09-12T02:00:00Z', null, []);
+      await check(onToday, 'https://example.com/same', ['a.com']);
+
+      await runAlertsForProperty(propertyId, { day: TODAY });
+      expect((await openAlerts()).some((r) => r.type === 'ranking_url_changed')).toBe(false);
+    });
+
+    it('raises for a domain that entered the top 3', async () => {
+      await rollup(BASELINE, 5);
+      await rollup(TODAY, 5);
+      await check(onBaselineDay, 'https://example.com/p', ['a.com', 'b.com', 'c.com']);
+      await check(onToday, 'https://example.com/p', ['a.com', 'rival.com', 'c.com']);
+
+      await runAlertsForProperty(propertyId, { day: TODAY });
+      const rows = await openAlerts();
+
+      const entered = rows.filter((r) => r.type === 'new_competitor_top_3');
+      expect(entered.map((r) => r.title).join(' ')).toContain('rival.com');
+      // The domains that were already there are not news.
+      expect(entered.map((r) => r.title).join(' ')).not.toContain('a.com');
+    });
+
+    it('does not raise for a domain that was already in the top 3', async () => {
+      await rollup(BASELINE, 5);
+      await rollup(TODAY, 5);
+      await check(onBaselineDay, 'https://example.com/p', ['a.com', 'b.com', 'c.com']);
+      await check(onToday, 'https://example.com/p', ['a.com', 'b.com', 'c.com']);
+
+      /*
+       * State the precondition before the negative assertion.
+       *
+       * "No alert was raised" is true for many reasons, most of them bugs — the
+       * query found no baseline row, the day bucketing landed elsewhere, the
+       * rows were not there at all. Checking that BOTH days are present and
+       * identical first means a failure says which half broke rather than
+       * merely that something did. (This assertion failed once in a full-suite
+       * run and never again in five; it is now diagnosable if it recurs.)
+       */
+      const days = await db.execute<{ day: string; n: number }>(sql`
+        SELECT (sc.checked_at AT TIME ZONE p.timezone)::date::text AS day, count(*)::int AS n
+        FROM serp_checks sc
+        JOIN properties p ON p.id = sc.property_id
+        WHERE sc.keyword_target_id = ${targetId}::uuid
+        GROUP BY 1 ORDER BY 1
+      `);
+      expect(days.rows.map((r) => r.day)).toEqual([BASELINE, TODAY]);
+
+      await runAlertsForProperty(propertyId, { day: TODAY });
+
+      const raised = (await openAlerts()).filter((r) => r.type === 'new_competitor_top_3');
+      expect(raised.map((r) => r.title)).toEqual([]);
+    });
+  });
+
   it('records an ingest run so /ops can see the engine is alive', async () => {
     await rollup(BASELINE, 4);
     await rollup(TODAY, 40);

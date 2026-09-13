@@ -41,7 +41,21 @@ export interface IngestRunRow {
   error: string | null;
 }
 
-export async function recentIngestRuns(limit = 50): Promise<IngestRunRow[]> {
+/**
+ * Recent runs, capped PER KIND rather than globally.
+ *
+ * A flat `ORDER BY started_at DESC LIMIT 50` is dominated by whichever job runs
+ * most often, and `serp_batch` opens one run per delivered pingback — roughly
+ * 1,600 a day at the documented volume, one every ~54 seconds. The 50-row list
+ * therefore spanned about 45 minutes, so a failed hourly `ingest-gsc` scrolled
+ * off the page before anyone looked and the failure counter read zero. This is
+ * the page §12 exists to make silent ingest death visible on.
+ *
+ * Per-kind means a chatty job can crowd out its own history but never anyone
+ * else's, so every job's most recent runs — and its failures — are always on
+ * screen.
+ */
+export async function recentIngestRuns(perKind = 12): Promise<IngestRunRow[]> {
   const result = await db.execute<{
     id: string;
     kind: IngestKind;
@@ -54,15 +68,21 @@ export async function recentIngestRuns(limit = 50): Promise<IngestRunRow[]> {
     cost_usd: string;
     error: string | null;
   }>(sql`
-    SELECT
-      r.id, r.kind, r.status, p.name AS property_name,
-      r.started_at, r.finished_at,
-      (EXTRACT(EPOCH FROM (r.finished_at - r.started_at)) * 1000)::int AS duration_ms,
-      r.rows_written, r.cost_usd::text AS cost_usd, r.error
-    FROM ingest_runs r
-    LEFT JOIN properties p ON p.id = r.property_id
-    ORDER BY r.started_at DESC
-    LIMIT ${limit}
+    WITH ranked AS (
+      SELECT
+        r.id, r.kind, r.status, p.name AS property_name,
+        r.started_at, r.finished_at,
+        (EXTRACT(EPOCH FROM (r.finished_at - r.started_at)) * 1000)::int AS duration_ms,
+        r.rows_written, r.cost_usd::text AS cost_usd, r.error,
+        ROW_NUMBER() OVER (PARTITION BY r.kind ORDER BY r.started_at DESC) AS rn
+      FROM ingest_runs r
+      LEFT JOIN properties p ON p.id = r.property_id
+    )
+    SELECT id, kind, status, property_name, started_at, finished_at,
+           duration_ms, rows_written, cost_usd, error
+    FROM ranked
+    WHERE rn <= ${perKind}
+    ORDER BY started_at DESC
   `);
 
   return result.rows.map((row) => ({

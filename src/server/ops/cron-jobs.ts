@@ -122,7 +122,23 @@ export const JOBS: Record<string, () => Promise<JobOutcome>> = {
 
   rollup: async () => ({ job: 'rollup', status: 'success', detail: await runRollupJob() }),
   alerts: () => perProperty('alerts', (id) => runAlertsForProperty(id)),
-  prune: async () => ({ job: 'prune', status: 'success', detail: await runPruneJob() }),
+
+  /*
+   * `prune` reports the status its own run recorded, not a hard-coded success.
+   *
+   * `runPruneJob` catches its failures internally so one broken step cannot
+   * skip the next, and marks the ingest_run partial or failed accordingly — but
+   * the dispatcher then answered HTTP 200 'success' regardless. An external
+   * scheduler watching exit codes saw a green tick while retention was failing,
+   * which is the one job whose silent failure fills the database.
+   */
+  prune: async () => {
+    const detail = await runPruneJob();
+    // A finished run is never 'running'; narrow rather than widen JobOutcome,
+    // which deliberately has no in-flight state.
+    const status = detail.status === 'running' ? 'success' : detail.status;
+    return { job: 'prune', status, detail };
+  },
   daily: runDaily,
 };
 

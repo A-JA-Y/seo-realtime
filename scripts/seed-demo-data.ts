@@ -16,11 +16,13 @@
  *   - a ranking URL that changes partway through
  *   - two locations that disagree, which is what the panel has to explain
  */
-import { eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray, isNull } from 'drizzle-orm';
 
 import { shiftDate, type DateString } from '@/lib/gsc-dates';
 import { db } from '@/server/db';
 import {
+  alerts,
+  dailyRankRollups,
   gscSnapshots,
   keywordTargets,
   keywords,
@@ -28,6 +30,7 @@ import {
   serpChecks,
 } from '@/server/db/schema';
 import { buildDailyRollups } from '@/server/ops/rollups';
+import { runAlertsForProperty } from '@/server/alerts/engine';
 
 const DAYS = 28;
 /** Fixed so re-running produces the same history. */
@@ -50,10 +53,34 @@ function rand(seed: number): number {
   return x - Math.floor(x);
 }
 
+/**
+ * Remove everything this script writes, and everything derived from it.
+ *
+ * Rollups and alerts are not written here, but they are computed FROM what is
+ * written here — so leaving them behind leaves a database that still shows
+ * synthetic movement after the synthetic checks are gone, with no way to tell
+ * it apart from real history. `--clear` has to mean cleared.
+ *
+ * Rollups cascade from keyword_targets, not from serp_checks, so deleting the
+ * checks does not take them with it.
+ */
 async function clear(propertyId: string) {
+  const targets = await db
+    .select({ id: keywordTargets.id })
+    .from(keywordTargets)
+    .where(eq(keywordTargets.propertyId, propertyId));
+
+  const ids = targets.map((t) => t.id);
+
+  if (ids.length > 0) {
+    await db.delete(dailyRankRollups).where(inArray(dailyRankRollups.keywordTargetId, ids));
+  }
+
+  await db.delete(alerts).where(eq(alerts.propertyId, propertyId));
   await db.delete(serpChecks).where(eq(serpChecks.propertyId, propertyId));
   await db.delete(gscSnapshots).where(eq(gscSnapshots.propertyId, propertyId));
-  console.log('  demo data removed');
+
+  console.log('  demo data removed (checks, Search Console rows, rollups, alerts)');
 }
 
 async function main() {
@@ -249,9 +276,34 @@ async function main() {
     to: ANCHOR as DateString,
   });
 
+  /*
+   * Run the alert engine forward over the seeded window.
+   *
+   * Not decoration. A demo dataset with an empty alerts feed makes the alerts
+   * page impossible to look at and, worse, makes its end-to-end tests skip
+   * themselves: the mark-read and resolve specs guard on "is there anything
+   * unread", so with no alerts they passed without executing — in CI, every
+   * time. A test that is always skipped is a test that is not there.
+   *
+   * Walking day by day rather than evaluating once also exercises the part
+   * that matters: alerts raised on one day, suppressed on the next, and
+   * resolved when their condition clears.
+   */
+  let raised = 0;
+  for (let back = DAYS; back >= 0; back--) {
+    const day = shiftDate(ANCHOR as DateString, -back);
+    raised += (await runAlertsForProperty(property.id, { day })).raised;
+  }
+
+  const openAlerts = await db
+    .select({ id: alerts.id })
+    .from(alerts)
+    .where(and(eq(alerts.propertyId, property.id), isNull(alerts.resolvedAt)));
+
   console.log(`  Search Console rows : ${gscRows}`);
   console.log(`  SERP checks         : ${checkRows}`);
   console.log(`  Daily rollups       : ${rollups.daysWritten}`);
+  console.log(`  Alerts raised       : ${raised} (${openAlerts.length} still open)`);
   console.log('\n  This is SYNTHETIC data. Run with --clear to remove it.\n');
 }
 

@@ -401,26 +401,43 @@ async function rankSparkline(
 export interface CompetitorRow {
   domain: string;
   /** How many of the property's tracked SERPs this domain appears on. */
+  /** Distinct tracked SERPs this domain appears on — not slots occupied. */
   appearances: number;
-  bestRank: number;
-  averageRank: number;
+  /** Null when every appearance carried a null rank_group. Never 0. */
+  bestRank: number | null;
+  averageRank: number | null;
   /** Keywords where this domain currently outranks us. */
   outranksUsOn: string[];
   lastSeen: Date | null;
 }
+
+/** A competitor last seen longer ago than this is history, not the landscape. */
+const COMPETITOR_WINDOW_DAYS = 30;
 
 /**
  * The competitive landscape across every tracked SERP (§11).
  *
  * Built from the competitor lists already captured on each check — the payload
  * was paid for either way, and §6 calls capturing it core rather than optional.
+ *
+ * Three things this gets right that it used to get wrong:
+ *
+ *  - "SERPs" counts DISTINCT targets, not rows. A domain holding two organic
+ *    slots on one page was counted twice, so a site with a sitelinks-style
+ *    double listing outranked one that appeared on twice as many keywords.
+ *  - A null `rank_group` stays null. `Number(null)` is 0, so a competitor whose
+ *    rank the provider did not report rendered as "Average rank 0.0" — a
+ *    position better than first, and exactly the sentinel domain rule 5 forbids.
+ *  - Only active targets, and only recent checks. Without either, a keyword
+ *    nobody tracks any more keeps populating the table from its last check,
+ *    for ever.
  */
 export async function competitors(scope: PropertyScope, limit = 25): Promise<CompetitorRow[]> {
   const result = await db.execute<{
     domain: string;
     appearances: number;
-    best_rank: number;
-    average_rank: string;
+    best_rank: number | null;
+    average_rank: string | null;
     outranks_us_on: string[] | null;
     last_seen: Date | string | null;
   }>(sql`
@@ -429,12 +446,15 @@ export async function competitors(scope: PropertyScope, limit = 25): Promise<Com
         sc.keyword_target_id, sc.keyword_id, sc.rank_group AS our_rank,
         sc.competing_domains, sc.checked_at
       FROM serp_checks sc
+      JOIN keyword_targets kt ON kt.id = sc.keyword_target_id AND kt.is_active
+      JOIN keywords kw ON kw.id = kt.keyword_id AND kw.is_active
       WHERE sc.property_id = ${scope.propertyId}
+        AND sc.checked_at >= now() - (${COMPETITOR_WINDOW_DAYS} * interval '1 day')
       ORDER BY sc.keyword_target_id, sc.checked_at DESC
     ),
     flat AS (
       SELECT
-        l.keyword_id, l.our_rank, l.checked_at,
+        l.keyword_target_id, l.keyword_id, l.our_rank, l.checked_at,
         (c->>'domain')::text AS domain,
         (c->>'rank_group')::int AS rank_group
       FROM latest l
@@ -443,7 +463,7 @@ export async function competitors(scope: PropertyScope, limit = 25): Promise<Com
     )
     SELECT
       f.domain,
-      COUNT(*)::int AS appearances,
+      COUNT(DISTINCT f.keyword_target_id)::int AS appearances,
       MIN(f.rank_group)::int AS best_rank,
       ROUND(AVG(f.rank_group)::numeric, 1)::text AS average_rank,
       ARRAY_AGG(DISTINCT k.term) FILTER (
@@ -453,15 +473,16 @@ export async function competitors(scope: PropertyScope, limit = 25): Promise<Com
     FROM flat f
     JOIN keywords k ON k.id = f.keyword_id
     GROUP BY f.domain
-    ORDER BY COUNT(*) DESC, MIN(f.rank_group) ASC
+    ORDER BY COUNT(DISTINCT f.keyword_target_id) DESC, MIN(f.rank_group) ASC NULLS LAST
     LIMIT ${limit}
   `);
 
   return result.rows.map((row) => ({
     domain: row.domain,
     appearances: row.appearances,
+    // Never Number(null): that is 0, a position better than first.
     bestRank: row.best_rank,
-    averageRank: Number(row.average_rank),
+    averageRank: row.average_rank === null ? null : Number(row.average_rank),
     outranksUsOn: row.outranks_us_on ?? [],
     lastSeen: toDate(row.last_seen),
   }));

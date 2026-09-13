@@ -2,6 +2,7 @@ import { sql } from 'drizzle-orm';
 
 import { db } from '@/server/db';
 import { withIngestRun } from '@/server/ingest/runs';
+import type { IngestStatus } from '@/server/db/schema';
 import { pruneRateLimits } from '@/server/api/rate-limit';
 import { buildDailyRollups } from './rollups';
 
@@ -46,6 +47,17 @@ export interface PruneResult {
   gscHourlyDeleted: number;
   rateLimitsDeleted: number;
   rollupsWritten: number;
+  /**
+   * What the run actually recorded.
+   *
+   * This job swallows its own step failures on purpose — one broken step must
+   * not skip the next — so the only way a caller can tell a clean run from a
+   * degraded one is to be told. The cron dispatcher used to answer HTTP 200
+   * 'success' unconditionally, so an external scheduler watching exit codes saw
+   * a green tick while retention was failing. Retention is the job whose silent
+   * failure fills the database.
+   */
+  status: IngestStatus;
 }
 
 export async function pruneSerpPayloads(days = PAYLOAD_RETENTION_DAYS): Promise<number> {
@@ -137,6 +149,7 @@ export async function runPruneJob(): Promise<PruneResult> {
       gscHourlyDeleted: 0,
       rateLimitsDeleted: 0,
       rollupsWritten: 0,
+      status: 'success',
     };
 
     /*
@@ -200,7 +213,7 @@ export async function runPruneJob(): Promise<PruneResult> {
     return result;
   });
 
-  return outcome.result;
+  return { ...outcome.result, status: outcome.status };
 }
 
 /** Earlier than any plausible check, so the pre-prune rollup has no hole. */

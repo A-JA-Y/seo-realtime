@@ -98,6 +98,15 @@ function taggedFound(targetId: string, overrides: Record<string, unknown> = {}):
   return envelope;
 }
 
+/** Restate a fixture's cost, so a test can use the real `task_get` shape. */
+function withTaskCost(envelope: SerpEnvelope, cost: number): SerpEnvelope {
+  return {
+    ...envelope,
+    cost,
+    tasks: (envelope.tasks ?? []).map((task) => ({ ...task, cost })),
+  };
+}
+
 describe.skipIf(!hasDb)('DataForSEO ingestion', () => {
   let orgId: string;
   let propertyId: string;
@@ -573,6 +582,44 @@ describe.skipIf(!hasDb)('DataForSEO ingestion', () => {
       expect((check!.competingDomains as unknown[]).length).toBe(10);
       expect(check!.serpFeatures).toMatchObject({ ai_overview: true, paid_count: 2 });
       expect(Number(check!.costUsd)).toBeCloseTo(0.0006, 6);
+    });
+
+    /*
+     * The real `task_get` shape, which is not what the fixture above carries.
+     *
+     * DataForSEO bills at `task_post` and serves results free for thirty days,
+     * so a genuine `task_get` answers `"cost": 0` — not null. `task.cost ?? …`
+     * does not catch a zero, so every scheduled check stored 0.000000 and /ops
+     * reported $0.00 month to date while the account was billed for all of it.
+     *
+     * The assertion above passes only because `live-advanced-found.json` is a
+     * LIVE response reused as a task_get answer, and it carries a real cost. The
+     * repository's one genuine task_get fixture, `task-get-error.json`, has
+     * `"cost": 0` — the accurate shape was already in the tree.
+     */
+    it('records the list price when the provider reports cost 0, as task_get does', async () => {
+      const client = fakeClient({
+        get: () => withTaskCost(taggedFound(targetId), 0),
+      });
+
+      await handleSerpPingback('task-1', { client, now });
+
+      const [check] = await db.select().from(serpChecks).where(eq(serpChecks.keywordTargetId, targetId));
+
+      // The price we were charged at submission, not the zero task_get reports.
+      expect(Number(check!.costUsd)).toBeCloseTo(0.0006, 6);
+      expect(Number(check!.costUsd)).toBeGreaterThan(0);
+    });
+
+    it('prefers a real cost when the provider does report one', async () => {
+      const client = fakeClient({
+        get: () => withTaskCost(taggedFound(targetId), 0.0031),
+      });
+
+      await handleSerpPingback('task-1', { client, now });
+
+      const [check] = await db.select().from(serpChecks).where(eq(serpChecks.keywordTargetId, targetId));
+      expect(Number(check!.costUsd)).toBeCloseTo(0.0031, 6);
     });
 
     it('stores the provider timestamp, not our receipt time', async () => {

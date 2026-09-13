@@ -277,6 +277,94 @@ export function evaluate(facts: TargetFacts): AlertCandidate[] {
   return alerts;
 }
 
+/* ══════════════════════════════════════════════════════════════════════════
+   Ingest failure — the only property-level alert
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/** Search Console is expected at least daily; this tolerates a long outage. */
+export const GSC_SILENCE_HOURS = 36;
+
+/** Targets check roughly four times a day, so a full day of nothing is dead. */
+export const SERP_SILENCE_HOURS = 24;
+
+export interface IngestFacts {
+  propertyId: string;
+  propertyName: string;
+  /** Null means no row has EVER arrived. */
+  hoursSinceGscRow: number | null;
+  hoursSinceSerpCheck: number | null;
+}
+
+/**
+ * Alert on ingest that has stopped (§9's `ingest_failure`).
+ *
+ * This type was declared in the schema and labelled in the alerts UI, and
+ * nothing produced it — so the one failure mode the whole system is least able
+ * to notice produced no alert at all. A job that stops running raises no error;
+ * it produces an absence, and an absence is invisible unless something goes
+ * looking. `/ops` does go looking, but `/ops` is agency_admin only and has to be
+ * opened by someone who already suspects.
+ *
+ * DEATH, not birth: both arms require that data once flowed. A property added
+ * an hour ago has no rows yet and is not broken, and alerting on it would fire
+ * on every onboarding. That case is `/ops`'s "never produced a row", which is
+ * where the runbook already sends you.
+ *
+ * The two sources are separate signatures because they fail independently and
+ * for different reasons — a Google credential expiring and a DataForSEO balance
+ * hitting zero are not the same incident.
+ */
+export function evaluateIngest(facts: IngestFacts, day: string): AlertCandidate[] {
+  const alerts: AlertCandidate[] = [];
+
+  const base = {
+    propertyId: facts.propertyId,
+    keywordId: null,
+    keywordTargetId: null,
+  };
+
+  // [bucket, hours silent, threshold, sentence-initial name, mid-sentence name]
+  const silent: Array<[string, number | null, number, string, string]> = [
+    ['gsc', facts.hoursSinceGscRow, GSC_SILENCE_HOURS, 'Search Console', 'Search Console'],
+    ['serp', facts.hoursSinceSerpCheck, SERP_SILENCE_HOURS, 'Live rank checks', 'live rank check'],
+  ];
+
+  for (const [bucket, hours, threshold, label, inSentence] of silent) {
+    if (hours === null || hours <= threshold) continue;
+
+    alerts.push({
+      ...base,
+      type: 'ingest_failure',
+      severity: 'critical',
+      title: `${label} ingest has stopped for ${facts.propertyName}`,
+      body:
+        `No ${inSentence} data has arrived for ${Math.floor(hours)} hours, against a ` +
+        `${threshold}-hour threshold. Nothing on this property's dashboard is moving because ` +
+        `nothing is being measured — the numbers on screen are the last ones we got. ` +
+        `See /ops for the run log.`,
+      // Property-level, so no target id. The bucket separates the two sources.
+      signature: signatureFor('ingest_failure', null, `${facts.propertyId}:${bucket}`),
+      payload: { day, source: bucket, hoursSilent: Math.floor(hours), threshold },
+    });
+  }
+
+  return alerts;
+}
+
+/** Clears as soon as data flows again. */
+export function resolvedIngestSignatures(facts: IngestFacts): string[] {
+  const cleared: string[] = [];
+
+  if (facts.hoursSinceGscRow !== null && facts.hoursSinceGscRow <= GSC_SILENCE_HOURS) {
+    cleared.push(signatureFor('ingest_failure', null, `${facts.propertyId}:gsc`));
+  }
+  if (facts.hoursSinceSerpCheck !== null && facts.hoursSinceSerpCheck <= SERP_SILENCE_HOURS) {
+    cleared.push(signatureFor('ingest_failure', null, `${facts.propertyId}:serp`));
+  }
+
+  return cleared;
+}
+
 /**
  * Whether both days aggregated enough checks to say anything.
  *

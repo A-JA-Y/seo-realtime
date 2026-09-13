@@ -12,6 +12,7 @@ import {
   properties,
   serpChecks,
 } from '@/server/db/schema';
+import { withIngestRun } from '@/server/ingest/runs';
 import { GSC_STALE_HOURS, ingestHealth, monthToDateSpend, recentIngestRuns } from './queries';
 
 const hasDb = Boolean(process.env.TEST_DATABASE_URL);
@@ -160,8 +161,32 @@ describe.skipIf(!hasDb)('ops queries', () => {
       expect(stuck!.durationMs).toBeNull();
     });
 
-    it('respects the limit', async () => {
-      expect((await recentIngestRuns(2)).length).toBeLessThanOrEqual(2);
+    /*
+     * Per KIND, not overall — and that is the whole point of the cap.
+     *
+     * `serp_batch` opens one run per delivered pingback, roughly one every 54
+     * seconds at the documented volume. Under a flat global limit those rows
+     * crowded out every other job within about 45 minutes, so a failed hourly
+     * `ingest-gsc` scrolled off the page the operator checks for exactly that.
+     */
+    it('caps each job separately, so a chatty job cannot bury a quiet one', async () => {
+      const noisy = 'serp_batch' as const;
+      for (let i = 0; i < 6; i++) {
+        await withIngestRun({ kind: noisy, propertyId }, async () => undefined);
+      }
+      await withIngestRun({ kind: 'rollup', propertyId }, async () => undefined);
+
+      const runs = await recentIngestRuns(2);
+      const byKind = new Map<string, number>();
+      for (const run of runs) byKind.set(run.kind, (byKind.get(run.kind) ?? 0) + 1);
+
+      for (const [kind, count] of byKind) {
+        expect(count, `${kind} exceeded the per-kind cap`).toBeLessThanOrEqual(2);
+      }
+
+      // The quiet job survives the noisy one, which is the property the flat
+      // limit lost.
+      expect(byKind.get('rollup') ?? 0).toBeGreaterThan(0);
     });
   });
 

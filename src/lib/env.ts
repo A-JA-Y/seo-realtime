@@ -79,12 +79,31 @@ const envSchema = z.object({
   AUTH_URL: origin('AUTH_URL'),
 
   // ── Seed (optional) ────────────────────────────────────────────────────────
-  SEED_ADMIN_EMAIL: z.string().email().optional(),
-  SEED_ADMIN_PASSWORD: z.string().min(8).optional(),
+  SEED_ADMIN_EMAIL: blankAsUnset(z.string().email()),
+  SEED_ADMIN_PASSWORD: blankAsUnset(z.string().min(8)),
   /** Optional: seeds a `client` account scoped to the seeded property only. */
-  SEED_CLIENT_EMAIL: z.string().email().optional(),
-  SEED_CLIENT_PASSWORD: z.string().min(8).optional(),
+  SEED_CLIENT_EMAIL: blankAsUnset(z.string().email()),
+  SEED_CLIENT_PASSWORD: blankAsUnset(z.string().min(8)),
 });
+
+/**
+ * An optional variable where an empty string means "not set".
+ *
+ * A `.env` file cannot express absence. `SEED_ADMIN_PASSWORD=` and a missing
+ * line look identical to a human and completely different to Zod: dotenv loads
+ * the first as `''`, which then fails `.min(8)` — so `.env.example`, whose
+ * whole job is to be copied, shipped a file that could not start the app. The
+ * documented first run (`cp .env.example .env.local && pnpm db:seed`) failed on
+ * a variable the README calls optional.
+ *
+ * Deliberately NOT applied to required variables. A required value left blank
+ * must still fail, loudly and by name — silently treating it as absent is how a
+ * deployment comes up with no database URL and a confusing error three layers
+ * down.
+ */
+function blankAsUnset<T extends z.ZodTypeAny>(schema: T) {
+  return z.preprocess((value) => (value === '' ? undefined : value), schema.optional());
+}
 
 export type Env = z.infer<typeof envSchema>;
 export type EnvKey = keyof Env;

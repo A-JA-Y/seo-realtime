@@ -178,14 +178,26 @@ describe('cron dispatcher routing', () => {
     expect(body).not.toContain(SECRET);
   });
 
-  it('reports the duration', async () => {
+  it('reports the duration on a SUCCESSFUL run', async () => {
+    /*
+     * The mock has to be armed BEFORE the call. It used to be set on the line
+     * after, so the request ran against the default mock, took the crash path,
+     * and the assertion passed on an error response — `durationMs` is present
+     * on both shapes, so the success path it names was never exercised.
+     */
+    rollup.mockResolvedValue({ job: 'rollup', status: 'success', detail: { daysWritten: 3 } });
+
     const { POST } = await load();
     const response = await POST(
       new Request(`${BASE}/rollup?secret=${SECRET}`, { method: 'POST' }),
       params('rollup'),
     );
 
-    rollup.mockResolvedValue({ job: 'rollup', status: 'success', detail: {} });
-    expect(typeof (await response.json()).durationMs).toBe('number');
+    expect(response.status).toBe(200);
+
+    const body = await response.json();
+    expect(body.status).toBe('success');
+    expect(typeof body.durationMs).toBe('number');
+    expect(body.durationMs).toBeGreaterThanOrEqual(0);
   });
 });

@@ -291,19 +291,28 @@ function RankTooltip({
   const entries = payload ?? [];
   const check = entries.find((e) => e.dataKey === 'rankGroup' || e.dataKey === 'rankAbsolute')
     ?.payload as RankChartCheck | undefined;
-  const gscEntry = entries.find((e) => e.dataKey === 'position')?.payload as
-    | RankChartGscPoint
-    | undefined;
 
-  // The GSC day this instant falls in, even when the hovered point is a check.
-  const gscDay =
-    gscEntry ??
-    gsc.reduce<RankChartGscPoint | undefined>((best, point) => {
-      const delta = Math.abs(point.t - label);
-      if (delta > 12 * 3_600_000) return best;
-      if (!best || delta < Math.abs(best.t - label)) return point;
-      return best;
-    }, undefined);
+  /*
+   * Resolved from the hovered INSTANT, never from Recharts' payload entry for
+   * the GSC line.
+   *
+   * This chart gives each series its own `data` array, and Recharts builds its
+   * tooltip index from the CONCATENATION of them all. A check timestamp never
+   * equals a Pacific-midday anchor, so its lookup by value misses and it falls
+   * back to the positional index — handing back the Nth GSC day for the Nth
+   * check. Hovering the 18th check on a 28-day chart showed that check's time
+   * beside a Search Console day two weeks away, with no sign anything was
+   * wrong.
+   *
+   * GSC anchors sit 24 hours apart at Pacific midday, so a ±12h window contains
+   * exactly one: the Pacific day the hovered instant actually falls in.
+   */
+  const gscDay = gsc.reduce<RankChartGscPoint | undefined>((best, point) => {
+    const delta = Math.abs(point.t - label);
+    if (delta > 12 * 3_600_000) return best;
+    if (!best || delta < Math.abs(best.t - label)) return point;
+    return best;
+  }, undefined);
 
   return (
     <div className="bg-popover text-popover-foreground min-w-56 rounded-lg border p-3 text-xs shadow-md">
@@ -338,16 +347,31 @@ function RankTooltip({
           <p className="text-muted-foreground">
             Search Console · {formatGscDate(gscDay.date)} (Pacific day)
           </p>
-          <Row color={SERIES.gsc.color} name="Average position">
-            {formatPosition(gscDay.position)}
-          </Row>
-          <p className="text-muted-foreground">
-            {formatInteger(gscDay.impressions)} impressions
-            {gscDay.isProvisional ? ' · provisional, Google may revise' : ''}
-          </p>
-          {gscDay.isLowConfidence ? (
-            <p className="text-muted-foreground">Under 3 impressions — treat as noise</p>
-          ) : null}
+          {/*
+            A day we hold nothing for is not a small measurement, it is no
+            measurement. `isLowConfidence` is true for those too (zero is under
+            three), so without this guard the tooltip described an empty day as
+            a reading too small to trust — while the table on the same page said
+            "no data".
+          */}
+          {gscDay.state === 'none' ? (
+            <p className="text-muted-foreground">
+              Google returned nothing for this day — not a small number, no rows.
+            </p>
+          ) : (
+            <>
+              <Row color={SERIES.gsc.color} name="Average position">
+                {formatPosition(gscDay.position)}
+              </Row>
+              <p className="text-muted-foreground">
+                {formatInteger(gscDay.impressions)} impressions
+                {gscDay.isProvisional ? ' · provisional, Google may revise' : ''}
+              </p>
+              {gscDay.isLowConfidence ? (
+                <p className="text-muted-foreground">Under 3 impressions — treat as noise</p>
+              ) : null}
+            </>
+          )}
         </div>
       ) : null}
     </div>
