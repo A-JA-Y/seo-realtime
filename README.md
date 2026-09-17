@@ -474,19 +474,36 @@ way to let an agent redeploy without a token ever passing through a chat.
 ### Scheduled work
 
 `vercel.json` registers one daily cron (`/api/cron/daily`: reconcile → rollup →
-prune → alerts) — Hobby allows once a day. The hourly jobs come from
-`.github/workflows/ingest.yml`, which hits the same dispatcher with a Bearer
-header; set `APP_BASE_URL` and `CRON_SECRET` as GitHub Actions **secrets** for
-it to work. See `requirements.md` §9 for the alternatives.
+prune → alerts) — Hobby allows once a day.
 
-| Job                                           | Driven by      | Schedule                           |
-| --------------------------------------------- | -------------- | ---------------------------------- |
-| `ingest-gsc`                                  | GitHub Actions | hourly at :05                      |
-| `enqueue-serp`                                | GitHub Actions | hourly at :05                      |
-| `backfill-gsc`                                | GitHub Actions | hourly at :05, no-op once complete |
-| `rollup` then `alerts`                        | GitHub Actions | hourly at :05, **in that order**   |
-| `daily` (reconcile → rollup → prune → alerts) | Vercel cron    | 04:00 UTC                          |
-| `bootstrap-demo`                              | you, once      | needs `DEMO_MODE=1`                |
+**Nothing in this repository schedules the hourly jobs.** The GitHub Actions
+workflow that used to (`.github/workflows/ingest.yml`) has been removed. Until
+you wire one of the options in `requirements.md` §9, a deployment ingests
+nothing: no Search Console rows, no SERP checks, and the dashboard stays empty
+— or, in demo mode, frozen at the day it was seeded.
+
+The cheapest option is a free external scheduler (cron-job.org or similar)
+calling the dispatcher hourly, in this order:
+
+```
+https://<your-app>.vercel.app/api/cron/ingest-gsc?secret=$CRON_SECRET
+https://<your-app>.vercel.app/api/cron/enqueue-serp?secret=$CRON_SECRET
+https://<your-app>.vercel.app/api/cron/rollup?secret=$CRON_SECRET
+https://<your-app>.vercel.app/api/cron/alerts?secret=$CRON_SECRET
+```
+
+`GET` with `?secret=` exists precisely for schedulers that cannot set headers;
+the comparison is constant-time. On Vercel Pro, register them in `vercel.json`
+instead (`"schedule": "5 * * * *"`) — on Hobby that same entry fails the deploy.
+
+| Job                                           | Driven by      | Schedule                        |
+| --------------------------------------------- | -------------- | ------------------------------- |
+| `ingest-gsc`                                  | your scheduler | hourly                          |
+| `enqueue-serp`                                | your scheduler | hourly                          |
+| `backfill-gsc`                                | your scheduler | hourly, no-op once complete     |
+| `rollup` then `alerts`                        | your scheduler | hourly, **in that order**       |
+| `daily` (reconcile → rollup → prune → alerts) | Vercel cron    | 04:00 UTC                       |
+| `bootstrap-demo`                              | you, once      | needs `DEMO_MODE=1`             |
 
 The order of `rollup` then `alerts` is load-bearing, not cosmetic. Alert
 baselines come from `daily_rank_rollups` (§9), so an engine that ran before the

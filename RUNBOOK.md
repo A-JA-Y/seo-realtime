@@ -20,7 +20,7 @@ do**. Where a step costs money, the price is stated.
 | Liveness + "is the schema migrated" | `GET /api/health` |
 | Job history | `ingest_runs` table, or `/ops` |
 | What each cron name runs | `src/server/ops/cron-jobs.ts` |
-| Scheduled jobs | `.github/workflows/ingest.yml` (hourly), `vercel.json` (daily) |
+| Scheduled jobs | `vercel.json` (daily only); the hourly jobs need an external scheduler — README → _Scheduled work_ |
 
 Every job is **individually addressable, safe to run twice, and processes
 properties independently**. There is no job you can make worse by re-running.
@@ -48,10 +48,11 @@ with status `failed` or `partial`.
 **What to do.**
 
 1. `/ops` → recent runs. Is there a row for the last hour?
-   - **No row:** the scheduler is not firing. Check the GitHub Actions run
-     history for `.github/workflows/ingest.yml`. The usual cause is a missing or
-     rotated `APP_BASE_URL` / `CRON_SECRET` **repository secret** — Actions
-     cannot read `.env.local`.
+   - **No row:** the scheduler is not firing. Nothing in this repository fires
+     the hourly jobs — check whichever external scheduler you wired up after
+     deploy (README → _Scheduled work_). The usual causes are a scheduler that
+     was never set up, or a rotated `CRON_SECRET` it still holds the old value
+     of.
    - **A `failed` row:** read its `failure_reasons`. They are redacted, so they
      are safe to paste into a ticket.
 2. Re-run the job by hand with the curl above. It is idempotent.

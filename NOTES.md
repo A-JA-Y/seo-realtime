@@ -590,10 +590,10 @@ are `Date` instances. The page was rendered against real data to confirm it.
 one entry is safe under any of them. Each step stays individually addressable
 for the external scheduler and for manual re-runs.
 
-The hourly work comes from `.github/workflows/ingest.yml` (requirements.md §9,
-Option C). It has a `concurrency` group: every job is idempotent, but two
+The hourly work came from `.github/workflows/ingest.yml` (requirements.md §9,
+Option B). It had a `concurrency` group: every job is idempotent, but two
 concurrent SERP batches would claim disjoint target sets and double the hourly
-spend.
+spend. _That workflow was removed on 2026-09-17 — see §91._
 
 A failed cron returns **500**, so the scheduler's own alerting sees it. That is
 the opposite of the pingback route, where a non-200 makes DataForSEO redeliver
@@ -1310,3 +1310,24 @@ Both `seed.ts` and the demo generator self-executed on import
 importable modules returning structured results, with thin command-line
 wrappers in `scripts/`. The hosted bootstrap job and the CLI run identical code
 — there is no second definition of what "seeded" means.
+
+### 91. The hourly scheduler left the repository
+
+On 2026-09-17 the repository owner deleted `.github/workflows/ci.yml` and
+`.github/workflows/ingest.yml` through GitHub. That is their call; the
+consequence needs recording because it is not visible from the code.
+
+`vercel.json` still runs `/api/cron/daily` once a day, and that chain does not
+include `ingest-gsc` or `enqueue-serp` — it cannot, Hobby allows one daily
+entry. So as of this commit **a fresh deployment ingests nothing** until an
+external scheduler is pointed at the dispatcher (requirements.md §9, Option A)
+or the project moves to Vercel Pro and the hourly entries go into
+`vercel.json` (Option C). The README's _Scheduled work_ section and RUNBOOK §1
+now say so instead of pointing at a file that is not there.
+
+The concurrency guard the workflow carried moves with it: whichever scheduler
+is used should not fire `enqueue-serp` twice in one window, or two batches
+claim disjoint targets and double the spend. `FOR UPDATE SKIP LOCKED` makes
+that safe, not free.
+
+`deploy.yml` is unaffected: it deploys, it does not schedule.

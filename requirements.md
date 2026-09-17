@@ -408,7 +408,8 @@ The dispatcher accepts `GET` with `?secret=` precisely so a scheduler that
 cannot set headers still works. The comparison is constant-time.
 
 **Option B — GitHub Actions.** Free, no third-party account. Scheduled workflows
-can be delayed under load, which is fine for hourly work.
+can be delayed under load, which is fine for hourly work. The repository does
+not ship this workflow; create it yourself if you choose this option.
 
 ```yaml
 # .github/workflows/ingest.yml
