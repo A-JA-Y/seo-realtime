@@ -1,0 +1,91 @@
+name: Deploy to Vercel
+
+# Deploys this branch to Vercel production, then (optionally) seeds the demo.
+#
+# It needs four repository secrets. Put them in Settings → Secrets → Actions —
+# NEVER in a chat, a commit, or a .env that is not gitignored:
+#
+#   VERCEL_TOKEN        vercel.com → Settings → Tokens
+#   VERCEL_ORG_ID       .vercel/project.json after `vercel link`, or the Vercel
+#   VERCEL_PROJECT_ID   project's Settings → General
+#   CRON_SECRET         the same value set in the Vercel project's env vars
+#
+# Without VERCEL_TOKEN the job skips itself with a message rather than failing,
+# so this file can sit in the repo before the project exists.
+
+on:
+  workflow_dispatch:
+    inputs:
+      bootstrap_demo:
+        description: 'After deploying, seed the demo accounts and 28 days of synthetic data (needs DEMO_MODE=1 on the project)'
+        type: boolean
+        default: false
+  push:
+    branches: [claude/confident-ritchie-7wv99d, main]
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    outputs:
+      url: ${{ steps.deploy.outputs.url }}
+    steps:
+      - name: Check secrets
+        id: gate
+        env:
+          HAS_TOKEN: ${{ secrets.VERCEL_TOKEN != '' }}
+        run: |
+          if [ "$HAS_TOKEN" != "true" ]; then
+            echo "::notice::VERCEL_TOKEN is not set — skipping deploy. Add it under Settings → Secrets → Actions."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.gate.outputs.skip != 'true'
+
+      - uses: pnpm/action-setup@v4
+        if: steps.gate.outputs.skip != 'true'
+      - uses: actions/setup-node@v4
+        if: steps.gate.outputs.skip != 'true'
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install Vercel CLI
+        if: steps.gate.outputs.skip != 'true'
+        run: npm install --global vercel@latest
+
+      # Pull the project's settings and env so the build here matches Vercel's.
+      - name: Pull Vercel environment
+        if: steps.gate.outputs.skip != 'true'
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+        run: vercel pull --yes --environment=production --token="${{ secrets.VERCEL_TOKEN }}"
+
+      - name: Deploy
+        id: deploy
+        if: steps.gate.outputs.skip != 'true'
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+        run: |
+          url=$(vercel deploy --prod --yes --token="${{ secrets.VERCEL_TOKEN }}")
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "::notice::Deployed to $url"
+
+      - name: Health check
+        if: steps.gate.outputs.skip != 'true'
+        run: |
+          curl -fsS "${{ steps.deploy.outputs.url }}/api/health" | tee /dev/stderr | grep -q '"migrated":true'
+
+      # Only on an explicit dispatch with the box ticked, and only if the
+      # project has DEMO_MODE=1 — the route refuses otherwise.
+      - name: Bootstrap demo accounts and data
+        if: steps.gate.outputs.skip != 'true' && github.event_name == 'workflow_dispatch' && inputs.bootstrap_demo
+        run: |
+          curl -fsS -X POST "${{ steps.deploy.outputs.url }}/api/cron/bootstrap-demo" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" | tee /dev/stderr

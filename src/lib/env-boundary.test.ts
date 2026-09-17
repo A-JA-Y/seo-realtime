@@ -73,6 +73,10 @@ describe('anti-pattern guards', () => {
       // drizzle-kit runs outside the Next runtime and cannot import the app
       // module graph just to generate SQL. Documented in NOTES.md §5.
       'drizzle.config.ts',
+      // The Vercel build command. It runs BEFORE the app exists — its whole job
+      // is to decide whether to migrate — so it cannot import env.ts, which
+      // requires every variable to be present and valid.
+      'scripts/vercel-build.mjs',
     ]);
 
     const offenders = excludingSelf(

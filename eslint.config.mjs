@@ -51,7 +51,7 @@ export default tseslint.config(
     languageOptions: {
       parserOptions: {
         projectService: {
-          allowDefaultProject: ['eslint.config.mjs', 'postcss.config.mjs'],
+          allowDefaultProject: ['eslint.config.mjs', 'postcss.config.mjs', 'scripts/*.mjs'],
         },
         tsconfigRootDir: import.meta.dirname,
       },
@@ -82,6 +82,15 @@ export default tseslint.config(
         'error',
         { checksVoidReturn: { attributes: false } },
       ],
+    },
+  },
+
+  {
+    // Plain-JavaScript build scripts run under Node, outside the TypeScript
+    // program, so the base config's no-undef needs told about Node's globals.
+    files: ['scripts/**/*.mjs'],
+    languageOptions: {
+      globals: { console: 'readonly', process: 'readonly' },
     },
   },
 

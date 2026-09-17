@@ -52,6 +52,27 @@ const generatedSecret = (label: string, min = 24) =>
     `${label} must be at least ${min} characters — generate one with \`openssl rand -hex 32\``,
   );
 
+/**
+ * On Vercel, default a URL variable to the project's production URL.
+ *
+ * `APP_BASE_URL` and `AUTH_URL` must match the served origin exactly (§72 in
+ * NOTES: a mismatch signs you in and then redirects you to a port nothing is
+ * listening on). But on a first deploy the origin does not exist yet, so the
+ * two variables cannot be filled in before the thing they describe — a
+ * chicken-and-egg that made "click Deploy" fail at env validation.
+ *
+ * Vercel exposes `VERCEL_PROJECT_PRODUCTION_URL` (host only, no scheme) at
+ * build and run time. When the variable is unset and that is present, use it.
+ * An explicit value always wins, so a custom domain is just a matter of setting
+ * the variable.
+ */
+const onVercelDefault = <T extends z.ZodTypeAny>(schema: T) =>
+  z.preprocess((value) => {
+    if (value !== undefined && value !== '') return value;
+    const host = process.env.VERCEL_PROJECT_PRODUCTION_URL;
+    return host ? `https://${host}` : value;
+  }, schema);
+
 const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
 
@@ -72,11 +93,18 @@ const envSchema = z.object({
 
   // ── Cron & app ─────────────────────────────────────────────────────────────
   CRON_SECRET: generatedSecret('CRON_SECRET'),
-  APP_BASE_URL: origin('APP_BASE_URL'),
+  APP_BASE_URL: onVercelDefault(origin('APP_BASE_URL')),
 
   // ── Auth.js ────────────────────────────────────────────────────────────────
   AUTH_SECRET: generatedSecret('AUTH_SECRET'),
-  AUTH_URL: origin('AUTH_URL'),
+  AUTH_URL: onVercelDefault(origin('AUTH_URL')),
+
+  /**
+   * Allows `/api/cron/bootstrap-demo` to seed SYNTHETIC data into this
+   * deployment. Off unless explicitly "1"/"true": a production database must
+   * not be fillable with fiction by anyone who holds the cron secret.
+   */
+  DEMO_MODE: blankAsUnset(z.enum(['0', '1', 'true', 'false'])),
 
   // ── Seed (optional) ────────────────────────────────────────────────────────
   SEED_ADMIN_EMAIL: blankAsUnset(z.string().email()),

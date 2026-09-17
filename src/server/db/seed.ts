@@ -3,8 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { eq, sql } from 'drizzle-orm';
 
 import { env } from '@/lib/env';
-import { redactError } from '@/lib/redact';
-import { BCRYPT_COST, hashPassword } from '@/server/auth/credentials';
+import { hashPassword } from '@/server/auth/credentials';
 import { db } from './index';
 import {
   LOCATIONS,
@@ -26,6 +25,18 @@ function log(message: string, extra: Record<string, unknown> = {}) {
   console.log(JSON.stringify({ level: 'info', job: 'seed', message, ...extra }));
 }
 
+export interface SeedResult {
+  organization: { name: string; slug: string };
+  property: { id: string; name: string; gscSiteUrl: string };
+  keywords: number;
+  targets: number;
+  adminEmail: string;
+  clientEmail: string | null;
+  /** Non-null only when the password was not supplied and had to be minted. */
+  generatedPassword: string | null;
+  generatedClientPassword: string | null;
+}
+
 /**
  * Seeds one organisation, one agency_admin, the first property and its
  * keywords/targets.
@@ -34,8 +45,14 @@ function log(message: string, extra: Record<string, unknown> = {}) {
  * table's natural key in `onConflictDoUpdate`, so re-running changes nothing
  * but the updatable columns. Existing passwords are never overwritten — that
  * would silently lock out an admin who has since changed theirs.
+ *
+ * A MODULE, not a script: `scripts/seed.ts` is the command-line wrapper, and
+ * the `bootstrap-demo` job calls this directly so a hosted deployment can be
+ * seeded without a local Postgres client. Returns a structured result rather
+ * than printing, because the two callers report it differently — and because
+ * a generated password must reach exactly one place, once.
  */
-async function seed() {
+export async function seed(): Promise<SeedResult> {
   const [org] = await db
     .insert(organizations)
     .values({ name: SEED_ORG.name, slug: SEED_ORG.slug })
@@ -206,47 +223,14 @@ async function seed() {
 
   log('keyword targets ready', { count: insertedTargets.length });
 
-  // ── Summary ───────────────────────────────────────────────────────────────
-  console.log('');
-  console.log(`  Organization   ${org.name} (${org.slug})`);
-  console.log(`  Property       ${property.name} — ${property.gscSiteUrl}`);
-  console.log(`  Keywords       ${insertedKeywords.length}`);
-  console.log(`  Targets        ${insertedTargets.length}`);
-  console.log(`  Admin login    ${adminEmail} (agency_admin, bcrypt cost ${BCRYPT_COST})`);
-  if (clientEmail) console.log(`  Client login   ${clientEmail} (client, granted this property)`);
-
-  if (generatedPassword) {
-    console.log('');
-    console.log(`  Generated admin password: ${generatedPassword}`);
-    console.log('  Shown once. Store it now, or set SEED_ADMIN_PASSWORD and re-seed.');
-  }
-
-  if (generatedClientPassword) {
-    console.log(`  Generated client password: ${generatedClientPassword}`);
-    console.log('  Also shown once.');
-  }
-
-  console.log('');
-  console.warn(
-    '  ! Verify location codes before the first paid SERP run:\n' +
-      '    curl -s https://api.dataforseo.com/v3/serp/google/locations -H "Authorization: Basic $CREDS" \\\n' +
-      '      | jq \'.tasks[0].result[] | select(.country_iso_code=="IN")\n' +
-      '             | select(.location_name|test("Noida|India$";"i"))\n' +
-      '             | {location_code, location_name, location_type}\'\n' +
-      '    A stale code returns rankings for the wrong geography without erroring.',
-  );
-  console.log('');
+  return {
+    organization: { name: org.name, slug: org.slug },
+    property: { id: property.id, name: property.name, gscSiteUrl: property.gscSiteUrl },
+    keywords: insertedKeywords.length,
+    targets: insertedTargets.length,
+    adminEmail,
+    clientEmail,
+    generatedPassword,
+    generatedClientPassword,
+  };
 }
-
-seed()
-  .then(() => process.exit(0))
-  .catch((error: unknown) => {
-    console.error(
-      JSON.stringify({
-        level: 'error',
-        job: 'seed',
-        error: redactError(error),
-      }),
-    );
-    process.exit(1);
-  });

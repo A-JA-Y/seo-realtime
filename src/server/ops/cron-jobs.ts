@@ -7,6 +7,9 @@ import {
 } from '@/server/ingest/gsc';
 import { enqueueSerpBatch } from '@/server/ingest/serp';
 import { runAlertsForProperty } from '@/server/alerts/engine';
+import { env } from '@/lib/env';
+import { demoProperty, seedDemoData } from '@/server/db/demo';
+import { seed } from '@/server/db/seed';
 import { runPruneJob } from './retention';
 import { runRollupJob } from './rollups';
 
@@ -140,6 +143,75 @@ export const JOBS: Record<string, () => Promise<JobOutcome>> = {
     return { job: 'prune', status, detail };
   },
   daily: runDaily,
+
+  /*
+   * Seed the demo accounts and 28 days of SYNTHETIC history into this
+   * deployment, so a hosted instance can be made demonstrable without a local
+   * Postgres client.
+   *
+   * Gated on DEMO_MODE, and the gate is not advisory. The cron secret
+   * authorises running jobs; it does not authorise filling a database with
+   * fiction, and anyone who obtained it should still be unable to. A production
+   * project simply never sets DEMO_MODE, and this job answers `failed` without
+   * touching a row.
+   *
+   * The passwords come from SEED_ADMIN_PASSWORD / SEED_CLIENT_PASSWORD in the
+   * deployment's own environment, and are never returned: a password minted
+   * here because none was set is written to the server log ONCE and nowhere
+   * else. This response carries emails only.
+   */
+  'bootstrap-demo': async () => {
+    if (env.DEMO_MODE !== '1' && env.DEMO_MODE !== 'true') {
+      return {
+        job: 'bootstrap-demo',
+        status: 'failed',
+        detail: {
+          error:
+            'DEMO_MODE is not enabled on this deployment. Set DEMO_MODE=1 in the environment ' +
+            'to allow synthetic data to be seeded here. Never enable it on a production project.',
+        },
+      };
+    }
+
+    const seeded = await seed();
+    const demo = await seedDemoData((await demoProperty()).id);
+
+    if (seeded.generatedPassword || seeded.generatedClientPassword) {
+      // Once, to the log, redacted from any response. Set SEED_*_PASSWORD to
+      // choose them instead — that is what a demo should do.
+      console.warn(
+        JSON.stringify({
+          level: 'warn',
+          job: 'bootstrap-demo',
+          message: 'passwords were generated because SEED_*_PASSWORD was not set; shown once',
+          ...(seeded.generatedPassword ? { admin_password: seeded.generatedPassword } : {}),
+          ...(seeded.generatedClientPassword
+            ? { client_password: seeded.generatedClientPassword }
+            : {}),
+        }),
+      );
+    }
+
+    return {
+      job: 'bootstrap-demo',
+      status: 'success',
+      detail: {
+        accounts: {
+          admin: seeded.adminEmail,
+          client: seeded.clientEmail,
+          passwords: 'as set in SEED_ADMIN_PASSWORD / SEED_CLIENT_PASSWORD (never returned here)',
+        },
+        property: demo.property.name,
+        keywords: seeded.keywords,
+        targets: seeded.targets,
+        searchConsoleRows: demo.gscRows,
+        serpChecks: demo.checkRows,
+        rollups: demo.rollups,
+        alertsRaised: demo.alertsRaised,
+        synthetic: true,
+      },
+    };
+  },
 };
 
 export const CRON_JOBS = Object.keys(JOBS);

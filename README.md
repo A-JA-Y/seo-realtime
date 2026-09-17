@@ -390,8 +390,9 @@ Each has a test.
 
 ## Security
 
-- `process.env` is read in exactly two files: `src/lib/env.ts` and
-  `drizzle.config.ts` (which runs outside the Next.js runtime).
+- `process.env` is read in exactly three files: `src/lib/env.ts`,
+  `drizzle.config.ts` and `scripts/vercel-build.mjs` — the last two run
+  outside the Next.js runtime, before the app exists. A test enforces the list.
 - Validation failures report variable **names and reasons, never values**.
 - Every error leaving a catch block goes through `redactError()`, which strips
   connection-string passwords, PEM blocks, `Authorization` headers and
@@ -405,14 +406,78 @@ Each has a test.
 
 ## Deployment
 
-Vercel, Hobby-compatible. `vercel.json` registers one daily cron
-(`/api/cron/daily`, which chains reconcile → rollup → prune → alerts). The
-hourly jobs come from `.github/workflows/ingest.yml`, which hits the same
-dispatcher with a Bearer header — see `requirements.md` §9 for the
-alternatives.
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2FA-JA-Y%2Fseo-realtime&project-name=rank-tracker&repository-name=seo-realtime&env=DATABASE_URL,DATABASE_URL_UNPOOLED,GOOGLE_SERVICE_ACCOUNT_EMAIL,GOOGLE_PRIVATE_KEY,DATAFORSEO_LOGIN,DATAFORSEO_PASSWORD,DATAFORSEO_PINGBACK_SECRET,CRON_SECRET,AUTH_SECRET,DEMO_MODE,SEED_ADMIN_EMAIL,SEED_ADMIN_PASSWORD,SEED_CLIENT_EMAIL,SEED_CLIENT_PASSWORD&envDescription=Every%20variable%20is%20explained%20in%20requirements.md%20section%2011.%20Leave%20APP_BASE_URL%20and%20AUTH_URL%20unset%3A%20they%20default%20to%20the%20Vercel%20production%20URL.&envLink=https%3A%2F%2Fgithub.com%2FA-JA-Y%2Fseo-realtime%2Fblob%2Fclaude%2Fconfident-ritchie-7wv99d%2Frequirements.md)
 
-Set `APP_BASE_URL` and `CRON_SECRET` as GitHub Actions **secrets** for that
-workflow to work.
+One click, then paste your `.env` values into the form Vercel shows. Everything
+below is what that button sets in motion, so it can also be done by hand.
+
+### What happens on deploy
+
+1. **Vercel runs `pnpm build:vercel`** (set in `vercel.json`), which applies
+   pending migrations against `DATABASE_URL_UNPOOLED` and then builds. Vercel
+   does not run migrations on its own; without this step the first request
+   would 500 on a missing table.
+2. **`APP_BASE_URL` and `AUTH_URL` default themselves.** Both must match the
+   served origin exactly, but on a first deploy the origin does not exist yet.
+   When unset, they fall back to `https://` + Vercel's
+   `VERCEL_PROJECT_PRODUCTION_URL`. Set them explicitly only for a custom
+   domain.
+3. **`/api/health`** reports `"migrated": true` once the schema is present.
+
+### Database
+
+Any Postgres 15+ works. The two strings come from Neon (`requirements.md` §8):
+the **pooled** one is `DATABASE_URL`, the **direct** one is
+`DATABASE_URL_UNPOOLED`. Vercel's Storage tab can create a Neon database and
+inject both automatically if you would rather not manage them.
+
+### Demo credentials
+
+The demo accounts are whatever **you** set — the repository never contains a
+password, and nothing returns one. For a demo project, set in Vercel:
+
+| Variable               | Suggested value                                                              |
+| ---------------------- | ---------------------------------------------------------------------------- |
+| `DEMO_MODE`            | `1` — allows synthetic data to be seeded. **Never on a production project.** |
+| `SEED_ADMIN_EMAIL`     | `demo-admin@example.com` — sees everything, including `/ops`                 |
+| `SEED_ADMIN_PASSWORD`  | your choice, 8+ characters                                                   |
+| `SEED_CLIENT_EMAIL`    | `demo-client@example.com` — a retainer client, scoped to one property        |
+| `SEED_CLIENT_PASSWORD` | your choice, 8+ characters                                                   |
+
+Then, once the deploy is live, seed the accounts and 28 days of synthetic
+history with one call:
+
+```bash
+curl -X POST "https://<your-app>.vercel.app/api/cron/bootstrap-demo" \
+  -H "Authorization: Bearer $CRON_SECRET"
+```
+
+It answers with the account emails and the row counts, never a password. It is
+idempotent — run it again and the history is regenerated, the accounts are
+untouched. It refuses outright unless `DEMO_MODE=1`, because the cron secret
+authorises running jobs, not filling a database with fiction.
+
+Sign in at `https://<your-app>.vercel.app/login`. The client account shows the
+product as a client sees it; the admin account adds `/ops`.
+
+To remove the synthetic data later, point a local checkout at the same
+database and run `pnpm db:demo --clear`. Then turn `DEMO_MODE` off.
+
+### Deploying from CI instead
+
+`.github/workflows/deploy.yml` deploys on push and can seed the demo on demand.
+It needs four repository secrets — `VERCEL_TOKEN`, `VERCEL_ORG_ID`,
+`VERCEL_PROJECT_ID`, `CRON_SECRET` — under _Settings → Secrets → Actions_.
+Until they exist it skips itself with a notice rather than failing. This is the
+way to let an agent redeploy without a token ever passing through a chat.
+
+### Scheduled work
+
+`vercel.json` registers one daily cron (`/api/cron/daily`: reconcile → rollup →
+prune → alerts) — Hobby allows once a day. The hourly jobs come from
+`.github/workflows/ingest.yml`, which hits the same dispatcher with a Bearer
+header; set `APP_BASE_URL` and `CRON_SECRET` as GitHub Actions **secrets** for
+it to work. See `requirements.md` §9 for the alternatives.
 
 | Job                                           | Driven by      | Schedule                           |
 | --------------------------------------------- | -------------- | ---------------------------------- |
@@ -421,11 +486,14 @@ workflow to work.
 | `backfill-gsc`                                | GitHub Actions | hourly at :05, no-op once complete |
 | `rollup` then `alerts`                        | GitHub Actions | hourly at :05, **in that order**   |
 | `daily` (reconcile → rollup → prune → alerts) | Vercel cron    | 04:00 UTC                          |
+| `bootstrap-demo`                              | you, once      | needs `DEMO_MODE=1`                |
 
-The order of the last two is load-bearing, not cosmetic. Alert baselines come
-from `daily_rank_rollups` (§9), so an engine that ran before the rollup would
-evaluate today against a rollup that does not exist yet and quietly find
-nothing — a silent alerting system, which is the failure mode nobody notices.
+The order of `rollup` then `alerts` is load-bearing, not cosmetic. Alert
+baselines come from `daily_rank_rollups` (§9), so an engine that ran before the
+rollup would evaluate today against a rollup that does not exist yet and quietly
+find nothing — a silent alerting system, which is the failure mode nobody
+notices.
 
 Every job is individually addressable, safe to run twice, and processes
+properties independently.
 properties independently.

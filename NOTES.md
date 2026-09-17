@@ -1257,3 +1257,56 @@ closed when it flattened. Walking the engine forward 22 days over the demo data:
 
 The general lesson: any threshold that both opens and closes a state needs two
 thresholds, or it will chatter at exactly the value that matters most.
+
+---
+
+## Deployment
+
+### 87. A build script is the third legitimate `process.env` reader
+
+`scripts/vercel-build.mjs` decides whether to run migrations before `next
+build`, which means it has to know whether `DATABASE_URL_UNPOOLED` is set. It
+cannot import `src/lib/env.ts` for that: env.ts requires every variable to be
+present and valid, and the whole point of this script is to behave sensibly
+when one is not (a preview deployment with no database still builds, loudly
+saying why its pages will fail).
+
+The M1 anti-pattern guard caught it immediately, which is what it is for. It
+is now the third documented exception beside `drizzle.config.ts`, for the same
+reason: it runs before the application exists.
+
+### 88. The origin variables cannot be set before the origin exists
+
+`APP_BASE_URL` and `AUTH_URL` must match the served origin exactly (§72). But
+on a first deploy there is no origin yet, so a one-click deploy failed at env
+validation asking for a URL nobody could know. Chicken and egg.
+
+Vercel exposes `VERCEL_PROJECT_PRODUCTION_URL` (host only) at build and run
+time. When either variable is unset and that is present, env.ts now defaults
+to `https://` + it. An explicit value always wins, so a custom domain is one
+variable. `SKIP_ENV_VALIDATION` is no longer needed for a normal Vercel build.
+
+### 89. The cron secret authorises jobs, not fiction
+
+`/api/cron/bootstrap-demo` seeds the accounts and 28 days of synthetic history
+into a hosted deployment, so a demo instance can exist without a local Postgres
+client. It sits behind the same secret as every other job — and that is not
+enough on its own. Someone holding the cron secret can already trigger real
+work; they must not be able to fill a production database with invented
+rankings.
+
+So the job is gated on `DEMO_MODE`, checked before a single row is touched,
+and a production project simply never sets it. The gate is unit-tested to
+refuse without CALLING the seed, not merely to fail afterwards.
+
+Passwords are never in the response. They come from `SEED_*_PASSWORD` in the
+deployment's own environment; one minted because none was set goes to the
+server log once. The response carries emails and row counts.
+
+### 90. The seed scripts became modules
+
+Both `seed.ts` and the demo generator self-executed on import
+(`seed().then(process.exit)`), so nothing else could call them. They are now
+importable modules returning structured results, with thin command-line
+wrappers in `scripts/`. The hosted bootstrap job and the CLI run identical code
+— there is no second definition of what "seeded" means.
