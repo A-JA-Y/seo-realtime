@@ -63,14 +63,34 @@ const generatedSecret = (label: string, min = 24) =>
  *
  * Vercel exposes `VERCEL_PROJECT_PRODUCTION_URL` (host only, no scheme) at
  * build and run time. When the variable is unset and that is present, use it.
- * An explicit value always wins, so a custom domain is just a matter of setting
- * the variable.
+ * An explicit value still wins, so a custom domain is just a matter of setting
+ * the variable — unless that value is loopback, which on Vercel is never a
+ * deployment origin, only a `.env` that travelled further than intended.
  */
+const LOOPBACK = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?\/?$/i;
+
 const onVercelDefault = <T extends z.ZodTypeAny>(schema: T) =>
   z.preprocess((value) => {
-    if (value !== undefined && value !== '') return value;
     const host = process.env.VERCEL_PROJECT_PRODUCTION_URL;
-    return host ? `https://${host}` : value;
+    if (!host) return value;
+
+    /*
+     * `.env.example` ships both of these as http://localhost:3000, and the
+     * documented deploy step is "paste your .env into Vercel's form" — which
+     * invites pasting the whole file. A loopback origin is a well-formed URL
+     * with no trailing slash, so it PASSED validation and the build went
+     * green; the damage showed up afterwards, exactly as the paragraph above
+     * describes. Sign-in set the cookie and then redirected the browser to a
+     * port nothing is listening on, and every queued SERP task asked
+     * DataForSEO to call back to localhost, so results never arrived and /ops
+     * showed spend against checks that stayed pending forever.
+     */
+    const stale =
+      value === undefined ||
+      value === '' ||
+      (typeof value === 'string' && LOOPBACK.test(value));
+
+    return stale ? `https://${host}` : value;
   }, schema);
 
 const envSchema = z.object({
@@ -171,6 +191,22 @@ let cached: Env | null = null;
 
 function loadEnv(): Env {
   if (cached) return cached;
+
+  /*
+   * Auth.js reads `process.env.AUTH_URL` itself — `createActionURL` in
+   * @auth/core treats it as the request origin, and `trustHost` does not
+   * override it; trustHost is only consulted when AUTH_URL is ABSENT. So
+   * correcting the parsed value in `onVercelDefault` is not enough for this
+   * one variable: the stale entry has to leave the environment, which is why
+   * this deletes rather than rewrites. Auth.js then derives the origin from
+   * the request host, which on Vercel is the served origin by definition.
+   */
+  if (
+    process.env.VERCEL_PROJECT_PRODUCTION_URL &&
+    LOOPBACK.test(process.env.AUTH_URL ?? '')
+  ) {
+    delete process.env.AUTH_URL;
+  }
 
   // Build-time escape hatch: `next build` evaluates route modules, and in CI
   // the runtime secrets are usually injected only at deploy time.

@@ -127,6 +127,85 @@ describe('env', () => {
   });
 });
 
+describe('origin defaults on Vercel', () => {
+  const PROD_HOST = 'rank-tracker-abc123.vercel.app';
+
+  afterEach(() => {
+    delete process.env.VERCEL_PROJECT_PRODUCTION_URL;
+  });
+
+  it('fills both origins from the production URL when they are unset', async () => {
+    // The chicken-and-egg this exists for: on a first deploy the origin does
+    // not exist yet, so neither variable can be filled in beforehand.
+    setEnv({ APP_BASE_URL: undefined, AUTH_URL: undefined });
+    process.env.VERCEL_PROJECT_PRODUCTION_URL = PROD_HOST;
+
+    const { env } = await import('./env');
+    expect(env.APP_BASE_URL).toBe(`https://${PROD_HOST}`);
+    expect(env.AUTH_URL).toBe(`https://${PROD_HOST}`);
+  });
+
+  it('overrides a LOCALHOST value, which a pasted .env brings with it', async () => {
+    /*
+     * `.env.example` ships both as http://localhost:3000 and the deploy step is
+     * "paste your .env into Vercel's form". A loopback origin is a well-formed
+     * URL, so it passed validation and the build went green — then sign-in set
+     * the cookie and redirected the browser to a port nothing is listening on,
+     * and every queued SERP task asked DataForSEO to call back to localhost.
+     */
+    setEnv({ APP_BASE_URL: 'http://localhost:3000', AUTH_URL: 'http://localhost:3000' });
+    process.env.VERCEL_PROJECT_PRODUCTION_URL = PROD_HOST;
+
+    const { env } = await import('./env');
+    expect(env.APP_BASE_URL).toBe(`https://${PROD_HOST}`);
+    expect(env.AUTH_URL).toBe(`https://${PROD_HOST}`);
+  });
+
+  it.each(['http://127.0.0.1:3000', 'http://localhost', 'https://localhost:3000'])(
+    'treats %s as loopback too',
+    async (value) => {
+      setEnv({ APP_BASE_URL: value });
+      process.env.VERCEL_PROJECT_PRODUCTION_URL = PROD_HOST;
+
+      const { env } = await import('./env');
+      expect(env.APP_BASE_URL).toBe(`https://${PROD_HOST}`);
+    },
+  );
+
+  it('REMOVES a loopback AUTH_URL from process.env, not just from the parsed value', async () => {
+    /*
+     * Auth.js reads process.env.AUTH_URL itself — `createActionURL` treats it
+     * as the request origin, and `trustHost` does not override it (trustHost is
+     * consulted only when AUTH_URL is absent). Correcting the parsed value is
+     * therefore not enough: the stale entry has to leave the environment.
+     */
+    setEnv({ AUTH_URL: 'http://localhost:3000' });
+    process.env.VERCEL_PROJECT_PRODUCTION_URL = PROD_HOST;
+
+    const { env } = await import('./env');
+    expect(env.AUTH_URL).toBe(`https://${PROD_HOST}`);
+    expect(process.env.AUTH_URL).toBeUndefined();
+  });
+
+  it('never overrides a real origin — a custom domain is just a set variable', async () => {
+    setEnv({ APP_BASE_URL: 'https://ranks.acme.com', AUTH_URL: 'https://ranks.acme.com' });
+    process.env.VERCEL_PROJECT_PRODUCTION_URL = PROD_HOST;
+
+    const { env } = await import('./env');
+    expect(env.APP_BASE_URL).toBe('https://ranks.acme.com');
+    expect(env.AUTH_URL).toBe('https://ranks.acme.com');
+  });
+
+  it('leaves localhost alone OFF Vercel, so local development still works', async () => {
+    setEnv({ APP_BASE_URL: 'http://localhost:3000', AUTH_URL: 'http://localhost:3000' });
+    delete process.env.VERCEL_PROJECT_PRODUCTION_URL;
+
+    const { env } = await import('./env');
+    expect(env.APP_BASE_URL).toBe('http://localhost:3000');
+    expect(process.env.AUTH_URL).toBe('http://localhost:3000');
+  });
+});
+
 describe('requireEnv', () => {
   it('validates only the named slice, ignoring everything else', async () => {
     // The setup story this exists for: someone verifying Search Console before

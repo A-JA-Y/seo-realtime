@@ -421,11 +421,15 @@ push redeploys.
 When you paste a `.env` file into Vercel's environment form, **leave three
 lines out**:
 
-| Leave out             | Why                                                                                                    |
-| --------------------- | ------------------------------------------------------------------------------------------------------ |
-| `APP_BASE_URL`        | it says `localhost:3000`; unset, it defaults to the Vercel URL. An explicit wrong value breaks sign-in. |
-| `AUTH_URL`            | same — Auth.js redirects to whatever this says                                                         |
-| `SKIP_ENV_VALIDATION` | it exists for CI builds; on a real deployment it hides a missing variable until the first request       |
+| Leave out             | Why                                                                                              |
+| --------------------- | ------------------------------------------------------------------------------------------------ |
+| `APP_BASE_URL`        | it says `localhost:3000`; unset, it defaults to this deployment's own URL                        |
+| `AUTH_URL`            | same — Auth.js redirects to whatever this says                                                   |
+| `SKIP_ENV_VALIDATION` | it exists for CI builds; on a real deployment it hides a missing variable until the first request |
+
+Pasting the two origins anyway is now defended rather than merely discouraged: a
+loopback value is treated as absent on Vercel and replaced with the deployment
+URL (NOTES.md §93). `SKIP_ENV_VALIDATION` is not — leave it out.
 
 Every other line goes in as-is, `GOOGLE_PRIVATE_KEY` included — the `\n`
 sequences inside it are unescaped by the app.

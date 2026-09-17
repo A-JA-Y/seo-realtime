@@ -1331,3 +1331,88 @@ claim disjoint targets and double the spend. `FOR UPDATE SKIP LOCKED` makes
 that safe, not free.
 
 `deploy.yml` is unaffected: it deploys, it does not schedule.
+
+### 92. The demo seeder wrote one row per HTTP request
+
+The first real Vercel deploy failed on an unconfigured environment, and an
+audit of what would break on the SECOND attempt found something worse waiting:
+`bootstrap-demo` could not have finished.
+
+`seedDemoData` wrote every row with its own `await db.insert(...).values({...})`
+inside keyword × target × day × hour. Measured, not estimated: **3,626 round
+trips** for one run. Against local Postgres over TCP that is 4.3s and invisible.
+In production it is not TCP — `src/server/db/index.ts` selects Neon's HTTP
+driver for any `.neon.tech` host, and that driver documents itself as one
+query per HTTPS request. At 50ms a trip that is three minutes, against the
+`maxDuration = 60` the cron dispatcher declares. requirements.md §8 tells the
+user to put Neon in Singapore while Vercel functions default to US East, so
+the realistic figure was worse, not better.
+
+And it could not converge. `clearDemoData` runs before the first write and the
+HTTP driver has no transactions, so every statement auto-commits: the 504 left
+a partial history, and the README's remedy — "run it again, it is idempotent" —
+deleted that partial progress and timed out in the same place. The documented
+way to make a demo exist was an infinite loop.
+
+Fixed by collecting into `NewGscSnapshot[]` / `NewSerpCheck[]` and flushing in
+chunks of 500, the way `gsc-upsert.ts` already did, plus one `inArray` update
+in place of 26. **3,626 → 256 round trips**, and the whole hosted job including
+`seed()` is 264. Identical output: 337 snapshots, 3,016 checks, 754 rollups, 30
+alerts, byte for byte what the unbatched version produced.
+
+Not reached for: `db.batch()`. It exists on `NeonHttpDatabase` but not on the
+node-postgres fallback that `createDb()` casts to that type, so it would have
+broken `pnpm db:demo` and the integration suite — green in production, red
+everywhere a developer could see it.
+
+### 93. A localhost origin passed validation and broke sign-in silently
+
+`.env.example` ships `APP_BASE_URL` and `AUTH_URL` as `http://localhost:3000`,
+and the documented deploy step is "paste your .env into Vercel's env form".
+`onVercelDefault` substituted the deployment URL only when the value was
+`undefined` or `''`. A loopback origin is a well-formed absolute URL with no
+trailing slash, so it passed `origin()`, and the build went **green**.
+
+The damage was all downstream. Sign-in verified the password, set the session
+cookie, and redirected the browser to a port nothing was listening on. Queued
+SERP tasks told DataForSEO to call back to `localhost`, so results never
+arrived and `/ops` showed spend against checks that stayed pending forever.
+Both failures look like application bugs and neither logs an error.
+
+Two changes, both inside `src/lib/env.ts`. `onVercelDefault` now treats a
+loopback value as stale, not just an absent one. And `loadEnv()` *deletes*
+`process.env.AUTH_URL` in that case rather than only correcting the parsed
+value — because Auth.js reads that variable itself (`createActionURL` treats it
+as the request origin) and `trustHost: true` does not override it; trustHost is
+consulted only when AUTH_URL is absent. Correcting our copy would have fixed
+`APP_BASE_URL` and left sign-in broken.
+
+Both gated on `VERCEL_PROJECT_PRODUCTION_URL`, so local development is
+untouched — verified the hard way: the e2e suite ran against a server on :3100
+with `AUTH_URL` still saying :3000 and produced exactly this bug,
+`ERR_CONNECTION_REFUSED` on every post-login assertion, 6 of 38 passing.
+
+### 94. The build script refuses instead of warning
+
+`scripts/vercel-build.mjs` used to warn about a missing `DATABASE_URL_UNPOOLED`
+and build anyway, "so a preview deployment without a database can exist". That
+was a fiction: the same missing configuration fails `next build` 50 seconds
+later at page-data collection, as a wall of Zod issues under "Failed to collect
+page data for /api/auth/[...nextauth]" — which reads like a bug in the app
+rather than an unconfigured project. That is exactly how the first real deploy
+failed.
+
+It now exits immediately, names the cause, and says which variables to add
+where. `SKIP_ENV_VALIDATION=1` is the genuine escape hatch and still warns and
+continues, because with it the build really can succeed without a database.
+
+Separately: drizzle-kit prints **nothing** when a migration fails. It renders
+the migration inside a hanji TaskView whose rejected branch ignores the error
+and re-prints the spinner, so the cause is discarded before drizzle-kit's own
+`console.error` can see it. Confirmed against a refused connection, a bad
+hostname and wrong credentials — exit 1, not one word, under a TTY as well, so
+Vercel cannot do better. Since migrate-on-build had never actually run on
+Vercel (the one real deploy took the skip branch), the next deploy is its first
+execution, so `run()` now prints the two likely causes and how to tell them
+apart.
+

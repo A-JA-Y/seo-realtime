@@ -80,12 +80,17 @@ jobs:
       - name: Health check
         if: steps.gate.outputs.skip != 'true'
         run: |
-          curl -fsS "${{ steps.deploy.outputs.url }}/api/health" | tee /dev/stderr | grep -q '"migrated":true'
+          # --fail-with-body, not -f: -f prints NOTHING on an HTTP error, and the
+          # body is where /api/health names the missing tables (or DB_UNREACHABLE).
+          curl --fail-with-body -sS "${{ steps.deploy.outputs.url }}/api/health" \
+            | tee /dev/stderr | grep -q '"migrated":true'
 
       # Only on an explicit dispatch with the box ticked, and only if the
       # project has DEMO_MODE=1 — the route refuses otherwise.
       - name: Bootstrap demo accounts and data
         if: steps.gate.outputs.skip != 'true' && github.event_name == 'workflow_dispatch' && inputs.bootstrap_demo
         run: |
-          curl -fsS -X POST "${{ steps.deploy.outputs.url }}/api/cron/bootstrap-demo" \
+          # Likewise: the refusal reason ("DEMO_MODE is not enabled...") is in the
+          # body, and -f would throw it away and print only "error: 500".
+          curl --fail-with-body -sS -X POST "${{ steps.deploy.outputs.url }}/api/cron/bootstrap-demo" \
             -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" | tee /dev/stderr

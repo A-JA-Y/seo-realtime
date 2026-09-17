@@ -31,6 +31,8 @@ import {
   keywords,
   properties,
   serpChecks,
+  type NewGscSnapshot,
+  type NewSerpCheck,
 } from '@/server/db/schema';
 import { buildDailyRollups } from '@/server/ops/rollups';
 import { runAlertsForProperty } from '@/server/alerts/engine';
@@ -38,6 +40,16 @@ import { runAlertsForProperty } from '@/server/alerts/engine';
 const DAYS = 28;
 /** Fixed so re-running produces the same history. */
 const ANCHOR = '2026-09-12';
+
+/**
+ * Rows per INSERT when flushing the generated history.
+ *
+ * Postgres caps a statement at 65,535 bound parameters, as
+ * `UPSERT_CHUNK` in gsc-upsert.ts notes. `serp_checks` is the wide side here:
+ * 13 scalar columns plus three jsonb blobs, so 500 rows is ~6,500 parameters —
+ * an order of magnitude under the cap, and small enough to retry cheaply.
+ */
+const CHUNK = 500;
 
 const COMPETITORS = [
   '99acres.com',
@@ -125,8 +137,19 @@ export async function seedDemoData(propertyId: string): Promise<DemoResult> {
       ),
     );
 
-  let gscRows = 0;
-  let checkRows = 0;
+  /*
+   * Collect, then flush in chunks. This used to write one row per statement,
+   * which is fine against local Postgres and ruinous in production: the Neon
+   * HTTP driver makes every statement a separate HTTPS round trip, so the
+   * 3,379 inserts below took 3,379 of them — minutes of pure latency, against
+   * the 60s cap the cron dispatcher declares. The hosted `bootstrap-demo` job
+   * timed out, and because `clearDemoData` runs first and the HTTP driver has
+   * no transactions, each retry deleted its own partial progress and timed out
+   * again at the same place. Batched, it is eight round trips.
+   */
+  const gscRowsToWrite: NewGscSnapshot[] = [];
+  const checkRowsToWrite: NewSerpCheck[] = [];
+  const targetIdsChecked: string[] = [];
 
   for (const [keywordIndex, keyword] of allKeywords.entries()) {
     /*
@@ -159,7 +182,7 @@ export async function seedDemoData(propertyId: string): Promise<DemoResult> {
 
       const clicks = impressions === 0 ? 0 : Math.round(impressions * 0.03 * rand(seed + 5));
 
-      await db.insert(gscSnapshots).values({
+      gscRowsToWrite.push({
         propertyId: property.id,
         keywordId: keyword.id,
         gscDate: date,
@@ -172,7 +195,6 @@ export async function seedDemoData(propertyId: string): Promise<DemoResult> {
         // generate a row the database would rightly refuse.
         position: position === null ? null : Math.max(1, position).toFixed(2),
       });
-      gscRows++;
     }
 
     /* ── SERP checks: four a day per target ───────────────────────────────── */
@@ -197,7 +219,7 @@ export async function seedDemoData(propertyId: string): Promise<DemoResult> {
           const droppedOut = keywordIndex === 4 && (back <= 1 || (back >= 10 && back <= 14));
 
           if (droppedOut) {
-            await db.insert(serpChecks).values({
+            checkRowsToWrite.push({
               keywordTargetId: target.id,
               propertyId: property.id,
               keywordId: keyword.id,
@@ -209,7 +231,6 @@ export async function seedDemoData(propertyId: string): Promise<DemoResult> {
               organicResultCount: 100,
               costUsd: '0.000600',
             });
-            checkRows++;
             continue;
           }
 
@@ -244,7 +265,7 @@ export async function seedDemoData(propertyId: string): Promise<DemoResult> {
             ? `https://${property.domain}/${keyword.term.split(' ').slice(-1)[0]}`
             : `https://${property.domain}/`;
 
-          await db.insert(serpChecks).values({
+          checkRowsToWrite.push({
             keywordTargetId: target.id,
             propertyId: property.id,
             keywordId: keyword.id,
@@ -272,16 +293,32 @@ export async function seedDemoData(propertyId: string): Promise<DemoResult> {
             organicResultCount: 100,
             costUsd: '0.000600',
           });
-          checkRows++;
         }
       }
 
-      await db
-        .update(keywordTargets)
-        .set({ lastCheckedAt: new Date(`${ANCHOR}T20:00:00Z`) })
-        .where(eq(keywordTargets.id, target.id));
+      targetIdsChecked.push(target.id);
     }
   }
+
+  /* ── Flush ────────────────────────────────────────────────────────────── */
+
+  for (let i = 0; i < gscRowsToWrite.length; i += CHUNK) {
+    await db.insert(gscSnapshots).values(gscRowsToWrite.slice(i, i + CHUNK));
+  }
+
+  for (let i = 0; i < checkRowsToWrite.length; i += CHUNK) {
+    await db.insert(serpChecks).values(checkRowsToWrite.slice(i, i + CHUNK));
+  }
+
+  if (targetIdsChecked.length > 0) {
+    await db
+      .update(keywordTargets)
+      .set({ lastCheckedAt: new Date(`${ANCHOR}T20:00:00Z`) })
+      .where(inArray(keywordTargets.id, targetIdsChecked));
+  }
+
+  const gscRows = gscRowsToWrite.length;
+  const checkRows = checkRowsToWrite.length;
 
   const rollups = await buildDailyRollups({
     from: shiftDate(ANCHOR as DateString, -DAYS - 1),
