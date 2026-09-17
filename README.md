@@ -411,6 +411,25 @@ Each has a test.
 One click, then paste your `.env` values into the form Vercel shows. Everything
 below is what that button sets in motion, so it can also be done by hand.
 
+**If you own this repository, do not use the button.** It _clones_ the source
+into a new repository under your account, which collides with the one you
+already have — or leaves you deploying a copy that drifts from this branch. Go
+to <https://vercel.com/new>, pick `A-JA-Y/seo-realtime` under _Import Git
+Repository_, and deploy. Production then tracks the default branch, and every
+push redeploys.
+
+When you paste a `.env` file into Vercel's environment form, **leave three
+lines out**:
+
+| Leave out             | Why                                                                                                    |
+| --------------------- | ------------------------------------------------------------------------------------------------------ |
+| `APP_BASE_URL`        | it says `localhost:3000`; unset, it defaults to the Vercel URL. An explicit wrong value breaks sign-in. |
+| `AUTH_URL`            | same — Auth.js redirects to whatever this says                                                         |
+| `SKIP_ENV_VALIDATION` | it exists for CI builds; on a real deployment it hides a missing variable until the first request       |
+
+Every other line goes in as-is, `GOOGLE_PRIVATE_KEY` included — the `\n`
+sequences inside it are unescaped by the app.
+
 ### What happens on deploy
 
 1. **Vercel runs `pnpm build:vercel`** (set in `vercel.json`), which applies
